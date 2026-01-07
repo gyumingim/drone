@@ -59,7 +59,7 @@ async def run():
         await drone.offboard.set_velocity_body(
             VelocityBodyYawspeed(0.0, 0.0, -5, 0.0)  # 위로 0.5 m/s
         )
-        await asyncio.sleep(12)
+        await asyncio.sleep(9)
 
         # Hover
         print("[Control] Hovering...")
