@@ -988,12 +988,14 @@ class LandingController(Backend):
             else:
                 target_vel = np.zeros(3)
 
-            # 현재 위치 유지 (속도 제어 모드)
-            target_pos = self.p.copy()
+            # 목표 위치를 속도 방향으로 계속 이동 (lookahead 방식)
+            # 이렇게 하면 PID 컨트롤러가 목표를 따라가려고 힘을 냄
+            lookahead_time = 2.0  # 2초 앞 위치를 목표로
+            target_pos = self.p + target_vel * lookahead_time
 
             # 5초마다 상태 출력
             if self.update_count % 150 == 0:
-                print(f"[MANUAL] Pos: {self.p}, Vel cmd: {target_vel}")
+                print(f"[MANUAL] Pos: {self.p}, Vel cmd: {target_vel}, Target: {target_pos}")
                 if self.tag_detected:
                     print(f"[MANUAL] Tag detected at: {self.tag_position}")
         else:
