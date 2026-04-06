@@ -1096,6 +1096,7 @@ class UWBApp:
                 else:
                     self.root.after(0, lambda sn=src_n, se=src_e:
                                     self._mark_relocated_new(sn, se))
+                    GazeboMonitor.despawn(src["name"], world=CFG["gz_world"])
 
             self._log(f"  → 설치 @ ({t_n:.1f},{t_e:.1f})")
             self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
@@ -1244,6 +1245,7 @@ class UWBApp:
                     else:
                         self.root.after(0, lambda sn=src["n"], se=src["e"]:
                                         self._mark_relocated_new(sn, se))
+                        GazeboMonitor.despawn(src["name"], world=CFG["gz_world"])
 
                 self._log(f"  → 설치 @ ({t_n:.1f},{t_e:.1f})")
                 self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
