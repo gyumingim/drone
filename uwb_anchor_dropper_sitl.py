@@ -160,16 +160,17 @@ class GazeboMonitor:
     def spawn(anchor: dict, world: str = "default"):
         n, e = anchor["n"], anchor["e"]
         name = anchor.get("name", f"uwb_anchor_{anchor['id']}")
-        sdf  = (
-            '<?xml version=\\"1.0\\"?><sdf version=\\"1.7\\">'
-            f'<model name=\\"{name}\\"><static>true</static>'
-            '<link name=\\"link\\"><visual name=\\"visual\\">'
-            '<geometry><cylinder><radius>0.12</radius><length>0.35</length>'
-            '</cylinder></geometry>'
-            '<material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>'
-            '</visual></link></model></sdf>'
+        sdf_xml = (
+            f'<?xml version="1.0"?><sdf version="1.7">'
+            f'<model name="{name}"><static>true</static>'
+            f'<link name="link"><visual name="visual">'
+            f'<geometry><cylinder><radius>0.12</radius><length>0.35</length>'
+            f'</cylinder></geometry>'
+            f'<material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>'
+            f'</visual></link></model></sdf>'
         )
-        req = (f'sdf: "{sdf}" '
+        sdf_esc = sdf_xml.replace('"', '\\"')   # protobuf text 포맷 이스케이프
+        req = (f'sdf: "{sdf_esc}" '
                f'pose {{ position {{ x: {e} y: {n} z: 0.175 }} }} name: "{name}"')
         try:
             subprocess.run(
@@ -505,6 +506,16 @@ class UWBApp:
 
         tk.Label(p, text="CONTROL", bg=C["panel"], fg=C["accent"],
                  font=("Courier", 11, "bold")).pack(pady=(12, 2))
+        self._sep(p)
+
+        mode_col = "#52e0a0" if MODE == "SITL" else "#ff8844"
+        tk.Label(p, text=f"MODE: {MODE}",
+                 bg=C["panel"], fg=mode_col,
+                 font=("Courier", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 1))
+        self.home_lbl = tk.Label(
+            p, text=f"🏠  홈: N={self.drone_home[0]:.1f} E={self.drone_home[1]:.1f}  (우클릭=변경)",
+            bg=C["panel"], fg=C["home"], font=("Courier", 8))
+        self.home_lbl.pack(anchor="w", padx=12, pady=(0, 3))
         self._sep(p)
 
         self.drone_pos_lbl = tk.Label(p, text="🚁  드론: 대기",
@@ -918,6 +929,8 @@ class UWBApp:
     def _on_set_home(self, ev):
         n, e = self.mapper.c2w(ev.x, ev.y)
         self.drone_home = [n, e]
+        self.home_lbl.config(
+            text=f"🏠  홈: N={n:.1f} E={e:.1f}  (우클릭=변경)")
         self._draw_map()
         self._log(f"  🏠 홈 위치 설정: N={n:.1f} E={e:.1f}")
 
@@ -1014,16 +1027,31 @@ class UWBApp:
         threading.Thread(target=_do, daemon=True).start()
 
     def _clear(self):
+        # 진행 중인 미션 중단
+        self._stop_evt.set()
+        self.btn_stop.config(state=tk.DISABLED)
+        self.btn_confirm.config(state=tk.DISABLED)
+
+        # 설치/설치중 앵커를 Gazebo에서 자동 삭제
+        to_despawn = self.installed_new | self.installing
+        if to_despawn:
+            world = CFG["gz_world"]
+            def _do():
+                for nm in to_despawn:
+                    GazeboMonitor.despawn(nm, world=world)
+                    self._log(f"  🗑 Gazebo 삭제: {nm}")
+            threading.Thread(target=_do, daemon=True).start()
+
         self.line_start = self.line_end = None
         self.preview = []; self.preview_blocked = []
         self.installing = set(); self.installed_new = set()
         self.info_var.set("선 없음")
-        self.btn_confirm.config(state=tk.DISABLED)
         self.relocated_existing_ids = set()
         self.reloc_new_positions    = []
         self.mission_steps          = []
         self.depot_remaining        = self.depot_stock_var.get()
         self._clear_drone_pos(); self._clear_rover()
+        self._draw_map()
 
     def _confirm(self):
         if not self.preview:
@@ -1411,6 +1439,7 @@ class UWBApp:
     # ══════════════════════════════════════════════════════════════════════
 
     def _on_close(self):
+        self._stop_evt.set()      # 미션 스레드 즉시 중단 → root.after 콜백 방지
         self.gz_monitor.stop()
         self.root.destroy()
 
