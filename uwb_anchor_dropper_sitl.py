@@ -456,10 +456,10 @@ class UWBApp:
         )
         self._cam_photo = None   # GC 방지용 참조
         if self.camera.ok:
-            self._log(f"  📷 카메라 시작: {CFG['camera_source']}")
-            self._cam_refresh()
+            self._log(f"  📷 카메라 연결: {CFG['camera_source']}")
         else:
-            self._log("  ℹ 카메라 없음 (더미 모드)")
+            self._log(f"  ℹ 카메라 없음 ({CFG['camera_source']})")
+        self.root.after(200, self._cam_refresh)   # UI 준비 후 시작
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -683,8 +683,16 @@ class UWBApp:
         self.cam_status_lbl.pack(side=tk.LEFT, padx=4)
         self.cam_canvas = tk.Canvas(p, width=216, height=162,
                                      bg="#050a0e", highlightthickness=1,
-                                     highlightbackground=C["border"])
-        self.cam_canvas.pack(padx=8, pady=(2, 4))
+                                     highlightbackground=C["border"],
+                                     cursor="hand2")
+        self.cam_canvas.pack(padx=8, pady=(2, 2))
+        self.cam_canvas.bind("<Button-1>", lambda _: self._open_cam_window())
+        tk.Label(p, text="클릭 → 큰 창", bg=C["panel"], fg=C["dim"],
+                 font=("Courier", 7)).pack(pady=(0, 2))
+        tk.Button(p, text="📷 카메라 창 열기", command=self._open_cam_window,
+                  bg=C["btn_spawn"], fg="white",
+                  font=("Courier", 9), relief="flat",
+                  cursor="hand2", pady=4).pack(fill=tk.X, padx=12, pady=2)
         self._sep(p)
 
         tk.Label(p, text="LOG", bg=C["panel"], fg=C["dim"],
@@ -1582,25 +1590,91 @@ class UWBApp:
     #  로그
     # ══════════════════════════════════════════════════════════════════════
 
+    def _open_cam_window(self):
+        """독립 카메라 창 열기 (640×480, 항상 최상위)."""
+        win = tk.Toplevel(self.root)
+        win.title("📷 카메라 뷰 — 앵커 감지")
+        win.configure(bg=C["bg"])
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+
+        W, H = 640, 480
+        canvas = tk.Canvas(win, width=W, height=H,
+                           bg="#050a0e", highlightthickness=0)
+        canvas.pack()
+
+        status = tk.Label(win, text="대기중...", bg=C["bg"], fg=C["dim"],
+                          font=("Courier", 9))
+        status.pack(pady=4)
+
+        photo_ref = [None]   # GC 방지
+
+        def _refresh():
+            if not win.winfo_exists():
+                return
+            frame = self.camera.get_frame()
+            det   = self.camera.detect_anchor(frame)
+
+            if frame is None:
+                # 카메라 없음 → 안내 텍스트
+                canvas.delete("all")
+                canvas.create_rectangle(0, 0, W, H, fill="#050a0e")
+                canvas.create_text(W//2, H//2 - 20,
+                    text="카메라 없음",
+                    fill="#3a5060", font=("Courier", 18, "bold"))
+                canvas.create_text(W//2, H//2 + 10,
+                    text=f"source: {CFG['camera_source']}",
+                    fill="#3a5060", font=("Courier", 11))
+                if CFG["camera_source"] == "gz":
+                    canvas.create_text(W//2, H//2 + 35,
+                        text="Gazebo를 먼저 실행하세요",
+                        fill="#3a5060", font=("Courier", 10))
+                status.config(text="카메라 연결 없음", fg=C["dim"])
+            else:
+                ann = self.camera.annotate(frame, det)
+                photo = self.camera.get_tk_image(ann, w=W, h=H)
+                if photo:
+                    canvas.delete("all")
+                    canvas.create_image(0, 0, anchor="nw", image=photo)
+                    photo_ref[0] = photo
+                if det:
+                    cx, cy = det[0], det[1]
+                    status.config(
+                        text=f"앵커 감지 ● 픽셀({cx},{cy})",
+                        fg="#52e0a0")
+                else:
+                    status.config(text="탐색 중...", fg=C["rover"])
+            win.after(66, _refresh)
+
+        _refresh()
+
     def _cam_refresh(self):
-        """66ms(15fps)마다 카메라 프레임을 갱신하고 앵커 감지 결과를 오버레이."""
-        if not self.camera.ok:
-            return
+        """66ms(15fps)마다 패널 소형 캔버스 갱신."""
         frame = self.camera.get_frame()
         det   = self.camera.detect_anchor(frame)
-        ann   = self.camera.annotate(frame, det)
-        photo = self.camera.get_tk_image(ann, w=216, h=162)
-        if photo:
+        if frame is None:
+            # 카메라 없음 → 안내 텍스트
             self.cam_canvas.delete("all")
-            self.cam_canvas.create_image(0, 0, anchor="nw", image=photo)
-            self._cam_photo = photo   # GC 방지
-            # 감지 상태 텍스트
+            self.cam_canvas.create_text(108, 70,
+                text="NO CAMERA", fill="#2a3a4a",
+                font=("Courier", 12, "bold"))
+            self.cam_canvas.create_text(108, 90,
+                text=f"({CFG['camera_source']})", fill="#2a3a4a",
+                font=("Courier", 8))
+            self.cam_status_lbl.config(text="없음", fg=C["dim"])
+        else:
+            ann   = self.camera.annotate(frame, det)
+            photo = self.camera.get_tk_image(ann, w=216, h=162)
+            if photo:
+                self.cam_canvas.delete("all")
+                self.cam_canvas.create_image(0, 0, anchor="nw", image=photo)
+                self._cam_photo = photo
             if det:
                 self.cam_status_lbl.config(
-                    text=f"앵커 감지 ({det[0]},{det[1]})", fg="#52e0a0")
+                    text=f"감지 ({det[0]},{det[1]})", fg="#52e0a0")
             else:
                 self.cam_status_lbl.config(
-                    text=f"({CFG['camera_source']}) 탐색중", fg=C["dim"])
+                    text="탐색중", fg=C["rover"])
         self.root.after(66, self._cam_refresh)
 
     def _on_close(self):
