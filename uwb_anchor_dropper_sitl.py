@@ -52,7 +52,7 @@ except ImportError:
 MODE = "SITL"
 
 CFG = {
-    "address"         : "udp://:14540",
+    "address"         : "serial:///dev/ttyACM0:57600",
     "flight_alt"      : -2.5,
     "drop_alt"        : -0.4,
     "move_wait"       : 4.0,
@@ -382,6 +382,7 @@ class UWBApp:
 
         self.drone_pos   = None
         self.drone_trail = []
+        self.drone_home  = list(DRONE_HOME)   # [n, e] — 우클릭으로 변경 가능
 
         self.rover_pos   = None
         self.rover_t     = 0.0
@@ -394,6 +395,8 @@ class UWBApp:
         self.relocated_existing_ids  = set()
         self.reloc_new_positions     = []
         self.mission_steps           = []
+        self._rover_gen              = 0
+        self._stop_evt               = threading.Event()
 
         self.spacing_var     = tk.DoubleVar(value=ANCHOR_SPACING)
         self.width_var       = tk.DoubleVar(value=ANCHOR_WIDTH)
@@ -405,6 +408,7 @@ class UWBApp:
         self.gz_monitor = GazeboMonitor(on_update=self._on_gz_update,
                                          world=CFG["gz_world"])
         self.gz_monitor.start()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ══════════════════════════════════════════════════════════════════════
     #  UI 구성
@@ -435,6 +439,7 @@ class UWBApp:
         self.canvas.bind("<ButtonPress-1>",   self._on_press)
         self.canvas.bind("<B1-Motion>",       self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<ButtonPress-3>",   self._on_set_home)   # 우클릭 = 홈 설정
         # 캔버스 밖에서 마우스를 놓아도 릴리즈 감지
         self.root.bind("<ButtonRelease-1>",   self._on_release_global)
 
@@ -576,6 +581,13 @@ class UWBApp:
             cursor="hand2", pady=8, state=tk.DISABLED)
         self.btn_confirm.pack(fill=tk.X, padx=12, pady=3)
 
+        self.btn_stop = tk.Button(
+            p, text="⏹  미션 중단", command=self._stop_mission,
+            bg="#4a1a1a", fg=C["text"],
+            font=("Courier", 10), relief="flat",
+            cursor="hand2", pady=6, state=tk.DISABLED)
+        self.btn_stop.pack(fill=tk.X, padx=12, pady=2)
+
         tk.Button(p, text="⚡ 미확인 앵커 Gazebo 스폰",
                   command=self._spawn_missing,
                   bg=C["btn_spawn"], fg="white",
@@ -681,11 +693,13 @@ class UWBApp:
         self._draw_rover_zone()
 
         # 4) 홈 마커
-        hx, hy = m.w2c(*DRONE_HOME)
+        hx, hy = m.w2c(*self.drone_home)
         self.canvas.create_oval(hx-10, hy-10, hx+10, hy+10,
                                  outline=C["home"], width=2, fill=C["bg"])
         self.canvas.create_text(hx, hy, text="H",
                                  fill=C["home"], font=("Courier", 9, "bold"))
+        self.canvas.create_text(hx, hy+16, text="우클릭=홈",
+                                 fill=C["dim"], font=("Courier", 7))
 
         # 5) 드래그 경로선 + 코리더 경계
         if self.line_start and self.line_end:
@@ -901,6 +915,12 @@ class UWBApp:
     #  마우스 이벤트
     # ══════════════════════════════════════════════════════════════════════
 
+    def _on_set_home(self, ev):
+        n, e = self.mapper.c2w(ev.x, ev.y)
+        self.drone_home = [n, e]
+        self._draw_map()
+        self._log(f"  🏠 홈 위치 설정: N={n:.1f} E={e:.1f}")
+
     def _on_press(self, ev):
         self.line_start = (ev.x, ev.y)
         self.line_end   = None
@@ -975,6 +995,11 @@ class UWBApp:
     #  버튼 콜백
     # ══════════════════════════════════════════════════════════════════════
 
+    def _stop_mission(self):
+        self._stop_evt.set()
+        self._log("⏹ 중단 요청됨...")
+        self.btn_stop.config(state=tk.DISABLED)
+
     def _spawn_missing(self):
         missing = [a for a in EXISTING_ANCHORS
                    if f"uwb_anchor_{a['id']}" not in self.gz_models]
@@ -1016,11 +1041,15 @@ class UWBApp:
         self.reloc_new_positions    = []
         self.mission_steps          = steps
         self.rover_trail            = []
+        self.installing             = set()
+        self.installed_new          = set()
 
         ndep  = sum(1 for s in steps if s["type"] == "from_depot")
         nrel  = sum(1 for s in steps if s["type"] == "relocate")
         nskip = sum(1 for s in steps if s["type"] == "skip")
+        self._stop_evt.clear()
         self.btn_confirm.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
         self._log("▶ 미션 시작")
         self._log(f"  총 {len(steps)}스텝 | 디포픽업 {ndep} | 재배치 {nrel} | 건너뜀 {nskip}")
         threading.Thread(target=self._run_mission, args=(steps,),
@@ -1031,14 +1060,14 @@ class UWBApp:
     # ══════════════════════════════════════════════════════════════════════
 
     def _run_mission(self, steps):
-        if not HAS_MAVSDK:
+        if MODE == "SITL" or not HAS_MAVSDK:
             self._run_dummy_mission(steps)
         else:
             asyncio.run(self._mission_coro(steps))
 
     def _run_dummy_mission(self, steps: list):
         self._log("  [SIM] 더미 시뮬레이션 모드")
-        n_home, e_home = DRONE_HOME
+        n_home, e_home = self.drone_home
         flight_alt     = abs(CFG["flight_alt"])
         drop_alt       = abs(CFG["drop_alt"])
         N = len(steps)
@@ -1046,6 +1075,12 @@ class UWBApp:
         self._log("  [SIM] 이륙...")
         self.root.after(0, lambda: self._update_rover_pos(0.0))
         for i in range(11):
+            if self._stop_evt.is_set():
+                self._log("⏹ [SIM] 이륙 중 중단됨")
+                self.root.after(0, self._clear_drone_pos)
+                self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
+                return
             alt = flight_alt * (i / 10)
             self.root.after(0, lambda n=n_home, e=e_home, a=alt:
                             self._update_drone_pos(n, e, a))
@@ -1054,6 +1089,8 @@ class UWBApp:
         prev_n, prev_e = n_home, e_home
 
         for idx, step in enumerate(steps):
+            if self._stop_evt.is_set():
+                self._log("⏹ [SIM] 미션 중단됨"); break
             atype  = step["type"]
             anchor = step["anchor"]
             t_n, t_e  = anchor["n"], anchor["e"]
@@ -1064,7 +1101,7 @@ class UWBApp:
                 self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
                 continue
 
-            self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
+            self._start_rover_move(rover_t)
 
             if atype == "from_depot":
                 pick_n, pick_e = step["rover_pos"]
@@ -1084,69 +1121,100 @@ class UWBApp:
                            f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
                 self._log(f"    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
 
+                if stype == "existing":
+                    def on_grab(sid=src["id"]):
+                        self.root.after(0, lambda: self._mark_relocated_existing(sid))
+                        GazeboMonitor.despawn(f"uwb_anchor_{sid}", world=CFG["gz_world"])
+                else:
+                    def on_grab(sn=src_n, se=src_e, nm=src["name"]):
+                        self.root.after(0, lambda: self._mark_relocated_new(sn, se))
+                        GazeboMonitor.despawn(nm, world=CFG["gz_world"])
+                        self.root.after(0, lambda: self._remove_from_installed(nm))
+
                 prev_n, prev_e = self._sim_fly_pick(
                     prev_n, prev_e, src_n, src_e,
-                    flight_alt, drop_alt, label=f"{src_label} 집기")
-
-                if stype == "existing":
-                    self.root.after(0, lambda sid=src["id"]:
-                                    self._mark_relocated_existing(sid))
-                    GazeboMonitor.despawn(f"uwb_anchor_{src['id']}",
-                                          world=CFG["gz_world"])
-                else:
-                    self.root.after(0, lambda sn=src_n, se=src_e:
-                                    self._mark_relocated_new(sn, se))
-                    GazeboMonitor.despawn(src["name"], world=CFG["gz_world"])
+                    flight_alt, drop_alt, label=f"{src_label} 집기",
+                    on_grab=on_grab)
 
             self._log(f"  → 설치 @ ({t_n:.1f},{t_e:.1f})")
             self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
             prev_n, prev_e = self._sim_fly_drop(
                 prev_n, prev_e, t_n, t_e, flight_alt, drop_alt, anchor)
 
-        self._log("\n[SIM] 홈 복귀...")
-        self._sim_move(prev_n, prev_e, n_home, e_home, flight_alt, steps=21)
-        for i in range(11):
-            alt = flight_alt * (1 - i/10)
-            self.root.after(0, lambda n=n_home, e=e_home, a=alt:
-                            self._update_drone_pos(n, e, a))
-            time.sleep(0.12)
+        if not self._stop_evt.is_set():
+            self._log("\n[SIM] 홈 복귀...")
+            self._sim_move(prev_n, prev_e, n_home, e_home, flight_alt, steps=21)
+            for i in range(11):
+                if self._stop_evt.is_set():
+                    break
+                alt = flight_alt * (1 - i/10)
+                self.root.after(0, lambda n=n_home, e=e_home, a=alt:
+                                self._update_drone_pos(n, e, a))
+                time.sleep(0.12)
 
-        self._log("✅ [SIM] 임무 완료!")
+        self._log("✅ [SIM] 임무 완료!" if not self._stop_evt.is_set() else "⏹ [SIM] 중단됨")
         self.root.after(0, self._clear_drone_pos)
         self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
 
     def _sim_move(self, n0, e0, n1, e1, alt, steps=20, delay=0.09):
         for i in range(steps + 1):
+            if self._stop_evt.is_set():
+                return
             t  = i / steps
             cn = n0 + t * (n1-n0); ce = e0 + t * (e1-e0)
             self.root.after(0, lambda n=cn, e=ce, a=alt:
                             self._update_drone_pos(n, e, a))
             time.sleep(delay)
 
-    def _sim_descend_ascend(self, n, e, flight_alt, drop_alt):
+    def _start_rover_move(self, target_t: float):
+        self._rover_gen += 1
+        gen = self._rover_gen
+        threading.Thread(target=self._sim_move_rover_to,
+                         args=(target_t, gen), daemon=True).start()
+
+    def _sim_move_rover_to(self, target_t: float, gen: int = 0,
+                           steps: int = 20, delay: float = 0.09):
+        start_t = self.rover_t
+        for i in range(steps + 1):
+            if self._rover_gen != gen:
+                break
+            t = start_t + (i / steps) * (target_t - start_t)
+            self.root.after(0, lambda tt=t: self._update_rover_pos(tt))
+            time.sleep(delay)
+
+    def _sim_descend_ascend(self, n, e, flight_alt, drop_alt, on_grab=None):
         for i in range(11):
+            if self._stop_evt.is_set():
+                return
             alt = flight_alt + (i/10) * (drop_alt - flight_alt)
             self.root.after(0, lambda nn=n, ee=e, a=alt:
                             self._update_drone_pos(nn, ee, a))
             time.sleep(0.07)
+        if on_grab:
+            on_grab()
         time.sleep(0.35)
         for i in range(11):
+            if self._stop_evt.is_set():
+                return
             alt = drop_alt + (i/10) * (flight_alt - drop_alt)
             self.root.after(0, lambda nn=n, ee=e, a=alt:
                             self._update_drone_pos(nn, ee, a))
             time.sleep(0.07)
 
     def _sim_fly_pick(self, n0, e0, dest_n, dest_e,
-                       flight_alt, drop_alt, label="집기"):
+                       flight_alt, drop_alt, label="집기", on_grab=None):
         self._sim_move(n0, e0, dest_n, dest_e, flight_alt)
         self._log(f"  [SIM] {label}...")
-        self._sim_descend_ascend(dest_n, dest_e, flight_alt, drop_alt)
+        self._sim_descend_ascend(dest_n, dest_e, flight_alt, drop_alt, on_grab=on_grab)
         return dest_n, dest_e
 
     def _sim_fly_drop(self, n0, e0, dest_n, dest_e,
                        flight_alt, drop_alt, anchor):
         self._sim_move(n0, e0, dest_n, dest_e, flight_alt)
         for i in range(11):
+            if self._stop_evt.is_set():
+                return dest_n, dest_e
             alt = flight_alt + (i/10) * (drop_alt - flight_alt)
             self.root.after(0, lambda n=dest_n, e=dest_e, a=alt:
                             self._update_drone_pos(n, e, a))
@@ -1154,7 +1222,10 @@ class UWBApp:
         self._log(f"  [SIM] {anchor['name']} 투하!")
         time.sleep(0.35)
         GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
+        self.root.after(0, lambda nm=anchor["name"]: self._mark_installed(nm))
         for i in range(11):
+            if self._stop_evt.is_set():
+                return dest_n, dest_e
             alt = drop_alt + (i/10) * (flight_alt - drop_alt)
             self.root.after(0, lambda n=dest_n, e=dest_e, a=alt:
                             self._update_drone_pos(n, e, a))
@@ -1164,11 +1235,20 @@ class UWBApp:
     def _mark_installing(self, name: str):
         self.installing.add(name); self._draw_map()
 
+    def _mark_installed(self, name: str):
+        """Gazebo 폴링 없이 즉시 installed 상태로 전환 (SIM/오프라인용)."""
+        self.installing.discard(name)
+        self.installed_new.add(name)
+        self._draw_map()
+
     def _mark_relocated_existing(self, anchor_id: int):
         self.relocated_existing_ids.add(anchor_id); self._draw_map()
 
     def _mark_relocated_new(self, orig_n: float, orig_e: float):
         self.reloc_new_positions.append((orig_n, orig_e)); self._draw_map()
+
+    def _remove_from_installed(self, name: str):
+        self.installed_new.discard(name); self._draw_map()
 
     def _depot_consume(self):
         if self.depot_remaining > 0:
@@ -1177,6 +1257,56 @@ class UWBApp:
         self.rover_pos_lbl.config(
             text=f"🚗  N:{rn:+.1f}  E:{re:+.1f}  디포:{self.depot_remaining}개")
         self._draw_map()
+
+    # ── REAL 모드 비행 헬퍼 ──────────────────────────────────────────────────
+
+    async def _wait_reach(self, drone, n, e, tol=0.5, timeout=20.0):
+        """목표 NED 좌표에 tol 미터 이내로 도달할 때까지 대기. timeout 초 초과 시 경고."""
+        t0 = asyncio.get_running_loop().time()
+        async for pv in drone.telemetry.position_velocity_ned():
+            dist = math.hypot(pv.position.north_m - n, pv.position.east_m - e)
+            if dist < tol:
+                break
+            if asyncio.get_running_loop().time() - t0 > timeout:
+                self._log(f"  ⚠ 이동 타임아웃 ({timeout:.0f}s) — 계속 진행")
+                break
+
+    async def _real_fly_pick(self, drone, dest_n, dest_e, on_grab=None):
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
+        await self._wait_reach(drone, dest_n, dest_e)
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
+        await asyncio.sleep(1.5)
+        if on_grab:
+            on_grab()
+        try:
+            await drone.gripper.grab()
+        except Exception:
+            await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
+        await asyncio.sleep(0.5)
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
+        await asyncio.sleep(2.0)
+
+    async def _real_fly_drop(self, drone, dest_n, dest_e, anchor):
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
+        await self._wait_reach(drone, dest_n, dest_e)
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
+        await asyncio.sleep(2.0)
+        try:
+            await drone.gripper.release()
+        except Exception:
+            await drone.action.set_actuator(CFG["gripper_actuator"], 1.)
+            await asyncio.sleep(1.5)
+            await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
+        await asyncio.sleep(CFG["drop_wait"])
+        GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
+        await asyncio.sleep(3.0)
 
     async def _mission_coro(self, steps: list):
         try:
@@ -1187,90 +1317,71 @@ class UWBApp:
                 if s.is_connected:
                     self._log("  ✅ 연결됨"); break
             async for h in drone.telemetry.health():
-                if h.is_global_position_ok and h.is_local_position_ok:
-                    self._log("  ✅ 위치 OK"); break
+                if h.is_local_position_ok:
+                    self._log("  ✅ 로컬 포지션 OK"); break
 
             pos_task = asyncio.create_task(self._telemetry_task(drone))
             await drone.action.arm()
             await drone.offboard.set_position_ned(
                 PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
             await drone.offboard.start()
+            self._log("  이륙...")
+            self.root.after(0, lambda: self._update_rover_pos(0.0))
             await asyncio.sleep(CFG["takeoff_wait"])
 
             N = len(steps)
             for idx, step in enumerate(steps):
-                atype  = step["type"]
-                anchor = step["anchor"]
-                t_n, t_e  = anchor["n"], anchor["e"]
-                rover_t   = step.get("rover_t", 0.0)
+                if self._stop_evt.is_set():
+                    self._log("⏹ 미션 중단됨"); break
+                atype   = step["type"]
+                anchor  = step["anchor"]
+                t_n, t_e = anchor["n"], anchor["e"]
+                rover_t  = step.get("rover_t", 0.0)
 
                 if atype == "skip":
                     self._log(f"\n⚠ [{idx+1}/{N}] {anchor['name']} — {step.get('reason','')}")
                     self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
                     continue
 
-                self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
+                self._start_rover_move(rover_t)
 
                 if atype == "from_depot":
                     p_n, p_e = step["rover_pos"]
-                    self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버")
-                else:
-                    src = step["source"]; stype = step["source_type"]
-                    p_n, p_e = src["n"], src["e"]
-                    self._log(f"\n─ [{idx+1}/{N}] 재배치: ({p_n:.1f},{p_e:.1f})")
-
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(p_n, p_e, CFG["flight_alt"], 0.))
-                await asyncio.sleep(CFG["move_wait"])
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(p_n, p_e, CFG["drop_alt"], 0.))
-                await asyncio.sleep(1.5)
-                try:
-                    await drone.gripper.grab()
-                except Exception:
-                    await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
-                await asyncio.sleep(0.5)
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(p_n, p_e, CFG["flight_alt"], 0.))
-                await asyncio.sleep(2.0)
-
-                if atype == "from_depot":
+                    self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버({p_n:.1f},{p_e:.1f})")
+                    await self._real_fly_pick(drone, p_n, p_e)
                     self.root.after(0, self._depot_consume)
-                else:
+
+                elif atype == "relocate":
+                    src   = step["source"]
+                    stype = step["source_type"]
+                    src_n, src_e = src["n"], src["e"]
+                    src_label = (f"A{src['id']}" if "id" in src
+                                 else f"신규({src_n:.1f},{src_e:.1f})")
+                    self._log(f"\n─ [{idx+1}/{N}] 재배치: {src_label} "
+                               f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
+                    self._log(f"    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
+
                     if stype == "existing":
-                        self.root.after(0, lambda sid=src["id"]:
-                                        self._mark_relocated_existing(sid))
-                        GazeboMonitor.despawn(f"uwb_anchor_{src['id']}",
-                                              world=CFG["gz_world"])
+                        def on_grab(sid=src["id"]):
+                            self.root.after(0, lambda: self._mark_relocated_existing(sid))
+                            GazeboMonitor.despawn(f"uwb_anchor_{sid}", world=CFG["gz_world"])
                     else:
-                        self.root.after(0, lambda sn=src["n"], se=src["e"]:
-                                        self._mark_relocated_new(sn, se))
-                        GazeboMonitor.despawn(src["name"], world=CFG["gz_world"])
+                        def on_grab(sn=src_n, se=src_e, nm=src["name"]):
+                            self.root.after(0, lambda: self._mark_relocated_new(sn, se))
+                            GazeboMonitor.despawn(nm, world=CFG["gz_world"])
+                            self.root.after(0, lambda: self._remove_from_installed(nm))
+
+                    await self._real_fly_pick(drone, src_n, src_e, on_grab=on_grab)
 
                 self._log(f"  → 설치 @ ({t_n:.1f},{t_e:.1f})")
                 self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(t_n, t_e, CFG["flight_alt"], 0.))
-                await asyncio.sleep(CFG["move_wait"])
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(t_n, t_e, CFG["drop_alt"], 0.))
-                await asyncio.sleep(2.0)
-                try:
-                    await drone.gripper.release()
-                except Exception:
-                    await drone.action.set_actuator(CFG["gripper_actuator"], 1.)
-                    await asyncio.sleep(1.5)
-                    await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
-                await asyncio.sleep(CFG["drop_wait"])
-                GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(t_n, t_e, CFG["flight_alt"], 0.))
-                await asyncio.sleep(3.0)
+                await self._real_fly_drop(drone, t_n, t_e, anchor)
 
+            h_n, h_e = self.drone_home
             self._log("\n홈 복귀...")
             await drone.offboard.set_position_ned(
-                PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
-            await asyncio.sleep(CFG["move_wait"])
+                PositionNedYaw(h_n, h_e, CFG["flight_alt"], 0.))
+            await self._wait_reach(drone, h_n, h_e)
             await drone.offboard.stop()
             await drone.action.land()
             self._log("✅ 임무 완료!")
@@ -1282,6 +1393,7 @@ class UWBApp:
             except Exception: pass
             self.root.after(0, self._clear_drone_pos)
             self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
 
     async def _telemetry_task(self, drone):
         try:
@@ -1297,6 +1409,10 @@ class UWBApp:
     # ══════════════════════════════════════════════════════════════════════
     #  로그
     # ══════════════════════════════════════════════════════════════════════
+
+    def _on_close(self):
+        self.gz_monitor.stop()
+        self.root.destroy()
 
     def _log(self, msg: str):
         def _do():
