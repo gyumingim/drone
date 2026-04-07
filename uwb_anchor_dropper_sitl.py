@@ -189,6 +189,16 @@ class GazeboMonitor:
 
     @staticmethod
     def despawn(name: str, world: str = "default"):
+        # 먼저 모델 존재 여부 확인 후 삭제
+        try:
+            check = subprocess.run(
+                ["gz", "model", "--list", "-w", world],
+                capture_output=True, text=True, timeout=3
+            )
+            if name not in check.stdout:
+                return   # 없는 모델 → 삭제 시도 안 함
+        except Exception:
+            pass
         try:
             subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/remove",
@@ -1042,8 +1052,8 @@ class UWBApp:
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_confirm.config(state=tk.DISABLED)
 
-        # 설치/설치중 앵커를 Gazebo에서 자동 삭제
-        to_despawn = self.installed_new | self.installing
+        # Gazebo에 실제로 존재하는 앵커만 삭제
+        to_despawn = (self.installed_new | self.installing) & self.gz_models
         if to_despawn:
             world = CFG["gz_world"]
             def _do():
@@ -1363,6 +1373,15 @@ class UWBApp:
             async for s in drone.core.connection_state():
                 if s.is_connected:
                     self._log("  ✅ 연결됨"); break
+
+            # GCS 연결 없이도 arm 허용 (SITL/오프보드 전용)
+            try:
+                await drone.param.set_param_int("NAV_RCL_ACT", 0)    # RC 끊김 액션 없음
+                await drone.param.set_param_int("COM_RCL_EXCEPT", 4) # GCS 예외 허용
+                self._log("  파라미터 설정 완료")
+            except Exception as pe:
+                self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
+
             async for h in drone.telemetry.health():
                 if h.is_local_position_ok:
                     self._log("  ✅ 로컬 포지션 OK"); break
