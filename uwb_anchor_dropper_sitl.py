@@ -45,6 +45,21 @@ try:
 except ImportError:
     HAS_MAVSDK = False
 
+try:
+    from camera_detector import AnchorDetector, HAS_CV2, HAS_PIL
+except ImportError:
+    HAS_CV2 = HAS_PIL = False
+    class AnchorDetector:          # 카메라 모듈 없을 때 더미
+        source = "none"; ok = False
+        def __init__(self, **kw): pass
+        def get_frame(self): return None
+        def detect_anchor(self, f=None): return None
+        def annotate(self, f, d=None): return f
+        def get_tk_image(self, f=None, w=200, h=150): return None
+        def stop(self): pass
+        @staticmethod
+        def pixel_to_ned_offset(*a, **kw): return 0., 0.
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  전역 설정
@@ -65,6 +80,13 @@ CFG = {
     "gripper_actuator": 1,
     "spawn_markers"   : True,
     "gz_world"        : "default",
+    # 카메라 설정
+    "camera_source"   : "gz",     # "gz" | "v4l2" | "none"
+    "camera_device"   : 0,        # v4l2 장치 번호
+    "camera_topic"    : "/drone/downward_cam/image",
+    "camera_fov"      : 90.0,     # 수평 FOV (degrees)
+    "cam_align_tol"   : 0.15,     # 앵커 중심 정렬 허용 오차 (m)
+    "cam_align_wait"  : 0.3,      # 정렬 확인 대기 (s)
 }
 
 MAP_N           = (-2.0, 20.0)
@@ -84,6 +106,17 @@ ANCHOR_WIDTH           = 3.0
 MIN_DIST_FROM_EXISTING = 8.0
 DRONE_HOME             = (0.0, 0.0)
 DEPOT_STOCK_DEFAULT    = 3   # 로버 초기 UWB 보유 수량
+
+# ── 앵커 ID 전역 카운터 (충돌 방지) ─────────────────────────────────────────
+_anchor_id_lock = threading.Lock()
+_next_anchor_id = len(EXISTING_ANCHORS) + 1
+
+def _alloc_anchor_id() -> int:
+    global _next_anchor_id
+    with _anchor_id_lock:
+        aid = _next_anchor_id
+        _next_anchor_id += 1
+    return aid
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -189,16 +222,6 @@ class GazeboMonitor:
 
     @staticmethod
     def despawn(name: str, world: str = "default"):
-        # 먼저 모델 존재 여부 확인 후 삭제
-        try:
-            check = subprocess.run(
-                ["gz", "model", "--list", "-w", world],
-                capture_output=True, text=True, timeout=3
-            )
-            if name not in check.stdout:
-                return   # 없는 모델 → 삭제 시도 안 함
-        except Exception:
-            pass
         try:
             subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/remove",
@@ -424,6 +447,20 @@ class UWBApp:
         self.gz_monitor = GazeboMonitor(on_update=self._on_gz_update,
                                          world=CFG["gz_world"])
         self.gz_monitor.start()
+
+        # 카메라 초기화
+        self.camera = AnchorDetector(
+            source=CFG["camera_source"],
+            gz_topic=CFG["camera_topic"],
+            v4l2_device=CFG["camera_device"],
+        )
+        self._cam_photo = None   # GC 방지용 참조
+        if self.camera.ok:
+            self._log(f"  📷 카메라 시작: {CFG['camera_source']}")
+            self._cam_refresh()
+        else:
+            self._log("  ℹ 카메라 없음 (더미 모드)")
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -633,10 +670,27 @@ class UWBApp:
                                     justify=tk.LEFT)
         self.gz_summary.pack(padx=12, pady=2)
 
+        # ── 카메라 뷰 ──────────────────────────────────────────────────────
+        self._sep(p)
+        cam_row = tk.Frame(p, bg=C["panel"])
+        cam_row.pack(anchor="w", padx=12, pady=(2, 0))
+        tk.Label(cam_row, text="📷 CAM", bg=C["panel"], fg=C["dim"],
+                 font=("Courier", 8)).pack(side=tk.LEFT)
+        self.cam_status_lbl = tk.Label(cam_row,
+                                        text=f"({CFG['camera_source']})",
+                                        bg=C["panel"], fg=C["dim"],
+                                        font=("Courier", 8))
+        self.cam_status_lbl.pack(side=tk.LEFT, padx=4)
+        self.cam_canvas = tk.Canvas(p, width=216, height=162,
+                                     bg="#050a0e", highlightthickness=1,
+                                     highlightbackground=C["border"])
+        self.cam_canvas.pack(padx=8, pady=(2, 4))
+        self._sep(p)
+
         tk.Label(p, text="LOG", bg=C["panel"], fg=C["dim"],
                  font=("Courier", 8)).pack(anchor="w", padx=12, pady=(6, 0))
         self.log = scrolledtext.ScrolledText(
-            p, width=28, height=14,
+            p, width=28, height=10,
             bg=C["log_bg"], fg=C["dim"],
             font=("Courier", 8), relief="flat", state=tk.DISABLED)
         self.log.pack(padx=8, pady=(0, 12), fill=tk.BOTH, expand=True)
@@ -992,9 +1046,10 @@ class UWBApp:
         self.preview         = accepted
         self.preview_blocked = blocked
 
+        # 미리보기용 임시 ID (충돌 위험 없음, 실제 미션 시 _alloc_anchor_id 재배정)
         anchors_tmp = [
             {"id": len(EXISTING_ANCHORS)+i+1, "n": n, "e": e,
-             "name": f"uwb_anchor_{len(EXISTING_ANCHORS)+i+1}"}
+             "name": f"uwb_anchor_preview_{i}"}
             for i, (n, e) in enumerate(self.preview)]
         self.mission_steps = plan_mission(
             anchors_tmp, self.depot_stock_var.get(),
@@ -1077,10 +1132,11 @@ class UWBApp:
         if not self.preview:
             return
         n0, e0 = self.path_start; n1, e1 = self.path_end
-        anchors = [
-            {"id": len(EXISTING_ANCHORS)+i+1, "n": n, "e": e,
-             "name": f"uwb_anchor_{len(EXISTING_ANCHORS)+i+1}"}
-            for i, (n, e) in enumerate(self.preview)]
+        # 미션 시작 시 유니크 ID 배정 (재실행/재배치 후 충돌 방지)
+        def _make_anchor(n, e):
+            aid = _alloc_anchor_id()
+            return {"id": aid, "n": n, "e": e, "name": f"uwb_anchor_{aid}"}
+        anchors = [_make_anchor(n, e) for (n, e) in self.preview]
         steps = plan_mission(anchors, self.depot_stock_var.get(),
                               n0, e0, n1, e1, EXISTING_ANCHORS)
 
@@ -1328,10 +1384,48 @@ class UWBApp:
                 self._log(f"  ⚠ 이동 타임아웃 ({timeout:.0f}s) — 계속 진행")
                 break
 
+    async def _cam_align(self, drone, cur_n, cur_e, alt: float, timeout=8.0):
+        """
+        카메라로 앵커를 찾아 드론을 정렬.
+        카메라 없거나 감지 실패 시 조용히 통과.
+        반환: (정렬된 n, 정렬된 e)
+        """
+        if not self.camera.ok:
+            return cur_n, cur_e
+        self._log("  📷 카메라 정렬 시도...")
+        t0  = asyncio.get_running_loop().time()
+        n, e = cur_n, cur_e
+        while asyncio.get_running_loop().time() - t0 < timeout:
+            frame = self.camera.get_frame()
+            det   = self.camera.detect_anchor(frame)
+            if det is None:
+                await asyncio.sleep(0.1)
+                continue
+            cx, cy, iw, ih = det
+            dn, de = AnchorDetector.pixel_to_ned_offset(
+                cx, cy, iw, ih, abs(alt), CFG["camera_fov"])
+            if abs(dn) < CFG["cam_align_tol"] and abs(de) < CFG["cam_align_tol"]:
+                self._log(f"  📷 정렬 완료: 오프셋 Δn={dn:.2f} Δe={de:.2f}")
+                return n, e
+            # 오프셋 보정 이동
+            n += dn; e += de
+            await drone.offboard.set_position_ned(
+                PositionNedYaw(n, e, alt, 0.))
+            await asyncio.sleep(CFG["cam_align_wait"])
+        self._log("  ⚠ 카메라 정렬 타임아웃 — 추정 위치로 픽업")
+        return n, e
+
     async def _real_fly_pick(self, drone, dest_n, dest_e, on_grab=None):
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await self._wait_reach(drone, dest_n, dest_e)
+        # 중간 고도에서 카메라 정렬 (앵커 위 정확히 위치)
+        mid_alt = CFG["flight_alt"] / 2
+        await drone.offboard.set_position_ned(
+            PositionNedYaw(dest_n, dest_e, mid_alt, 0.))
+        await asyncio.sleep(1.5)
+        dest_n, dest_e = await self._cam_align(drone, dest_n, dest_e, mid_alt)
+        # 정렬된 위치로 최종 하강
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
         await asyncio.sleep(1.5)
@@ -1488,9 +1582,31 @@ class UWBApp:
     #  로그
     # ══════════════════════════════════════════════════════════════════════
 
+    def _cam_refresh(self):
+        """66ms(15fps)마다 카메라 프레임을 갱신하고 앵커 감지 결과를 오버레이."""
+        if not self.camera.ok:
+            return
+        frame = self.camera.get_frame()
+        det   = self.camera.detect_anchor(frame)
+        ann   = self.camera.annotate(frame, det)
+        photo = self.camera.get_tk_image(ann, w=216, h=162)
+        if photo:
+            self.cam_canvas.delete("all")
+            self.cam_canvas.create_image(0, 0, anchor="nw", image=photo)
+            self._cam_photo = photo   # GC 방지
+            # 감지 상태 텍스트
+            if det:
+                self.cam_status_lbl.config(
+                    text=f"앵커 감지 ({det[0]},{det[1]})", fg="#52e0a0")
+            else:
+                self.cam_status_lbl.config(
+                    text=f"({CFG['camera_source']}) 탐색중", fg=C["dim"])
+        self.root.after(66, self._cam_refresh)
+
     def _on_close(self):
-        self._stop_evt.set()      # 미션 스레드 즉시 중단 → root.after 콜백 방지
+        self._stop_evt.set()
         self.gz_monitor.stop()
+        self.camera.stop()
         self.root.destroy()
 
     def _log(self, msg: str, tag: str = "info"):
