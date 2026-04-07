@@ -309,6 +309,7 @@ def plan_mission(anchors: list, depot_stock: int,
                 "rover_t"   : rover_t,
             })
             remaining_depot -= 1
+            installed_new.append(anchor)   # 실제 설치 → 재배치 후보로 등록
 
         else:
             candidates = []
@@ -343,14 +344,14 @@ def plan_mission(anchors: list, depot_stock: int,
                     "rover_pos"   : (rover_n, rover_e),
                     "rover_t"     : rover_t,
                 })
+                installed_new.append(anchor)   # 실제 설치 → 재배치 후보로 등록
             else:
                 steps.append({
                     "type"   : "skip",
                     "anchor" : anchor,
                     "reason" : "로버 뒤 재배치 후보 없음 (모두 앞쪽이거나 소진)",
                 })
-
-        installed_new.append(anchor)
+                # skip된 앵커는 미설치이므로 installed_new에 추가하지 않음
 
     return steps
 
@@ -443,6 +444,7 @@ class UWBApp:
         self.canvas.bind("<ButtonPress-3>",   self._on_set_home)   # 우클릭 = 홈 설정
         # 캔버스 밖에서 마우스를 놓아도 릴리즈 감지
         self.root.bind("<ButtonRelease-1>",   self._on_release_global)
+        self.root.bind("<Escape>",            lambda _: self._stop_mission())
 
         self._draw_map()
 
@@ -624,6 +626,10 @@ class UWBApp:
             bg=C["log_bg"], fg=C["dim"],
             font=("Courier", 8), relief="flat", state=tk.DISABLED)
         self.log.pack(padx=8, pady=(0, 12), fill=tk.BOTH, expand=True)
+        self.log.tag_configure("ok",   foreground="#52e0a0")
+        self.log.tag_configure("warn", foreground="#ffd060")
+        self.log.tag_configure("err",  foreground="#e05252")
+        self.log.tag_configure("info", foreground=C["dim"])
 
     # ══════════════════════════════════════════════════════════════════════
     #  Gazebo 콜백
@@ -1416,6 +1422,18 @@ class UWBApp:
 
         except Exception as ex:
             self._log(f"❌ {ex}")
+            try:
+                await drone.offboard.stop()
+            except Exception:
+                pass
+            try:
+                self._log("  긴급 착지 시도...")
+                await drone.action.land()
+                async for in_air in drone.telemetry.in_air():
+                    if not in_air:
+                        self._log("  착지 완료"); break
+            except Exception:
+                pass
         finally:
             try: pos_task.cancel()
             except Exception: pass
@@ -1443,10 +1461,18 @@ class UWBApp:
         self.gz_monitor.stop()
         self.root.destroy()
 
-    def _log(self, msg: str):
+    def _log(self, msg: str, tag: str = "info"):
+        # 메시지 내용으로 태그 자동 결정
+        if tag == "info":
+            if msg.startswith(("✅", "▶", "완료")):
+                tag = "ok"
+            elif msg.startswith(("⚠", "⏹", "타임아웃")):
+                tag = "warn"
+            elif msg.startswith("❌"):
+                tag = "err"
         def _do():
             self.log.config(state=tk.NORMAL)
-            self.log.insert(tk.END, msg + "\n")
+            self.log.insert(tk.END, msg + "\n", tag)
             self.log.see(tk.END)
             self.log.config(state=tk.DISABLED)
         self.root.after(0, _do)
