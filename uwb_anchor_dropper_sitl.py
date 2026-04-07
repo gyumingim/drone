@@ -1100,11 +1100,17 @@ class UWBApp:
             asyncio.run(self._mission_coro(steps))
 
     def _run_dummy_mission(self, steps: list):
+        self._stop_evt.clear()   # 방어용: 이전 중단 이벤트 잔류 방지
         self._log("  [SIM] 더미 시뮬레이션 모드")
         n_home, e_home = self.drone_home
         flight_alt     = abs(CFG["flight_alt"])
         drop_alt       = abs(CFG["drop_alt"])
         N = len(steps)
+
+        ndep  = sum(1 for s in steps if s["type"] == "from_depot")
+        nrel  = sum(1 for s in steps if s["type"] == "relocate")
+        nskip = sum(1 for s in steps if s["type"] == "skip")
+        self._log(f"  스텝: 디포={ndep} 재배치={nrel} 건너뜀={nskip}")
 
         self._log("  [SIM] 이륙...")
         self.root.after(0, lambda: self._update_rover_pos(0.0))
