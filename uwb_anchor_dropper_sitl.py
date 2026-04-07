@@ -49,10 +49,14 @@ except ImportError:
 # ════════════════════════════════════════════════════════════════════════════
 #  전역 설정
 # ════════════════════════════════════════════════════════════════════════════
+# SITL  = Gazebo SITL (UDP, PX4 실제 제어)
+# REAL  = 실제 드론 (시리얼)
+# mavsdk 없으면 자동으로 tkinter 더미 애니메이션 fallback
 MODE = "SITL"
 
 CFG = {
-    "address"         : "serial:///dev/ttyACM0:57600",
+    "address"         : "udp://:14540",                  # SITL: Gazebo PX4
+    "real_address"    : "serial:///dev/ttyACM0:57600",   # REAL: 실제 드론
     "flight_alt"      : -2.5,
     "drop_alt"        : -0.4,
     "move_wait"       : 4.0,
@@ -1094,10 +1098,13 @@ class UWBApp:
     # ══════════════════════════════════════════════════════════════════════
 
     def _run_mission(self, steps):
-        if MODE == "SITL" or not HAS_MAVSDK:
+        if not HAS_MAVSDK:
+            self._log("⚠ mavsdk 없음 → 더미 시뮬레이션")
             self._run_dummy_mission(steps)
-        else:
-            asyncio.run(self._mission_coro(steps))
+        elif MODE == "SITL":
+            asyncio.run(self._mission_coro(steps, address=CFG["address"]))
+        else:  # REAL
+            asyncio.run(self._mission_coro(steps, address=CFG["real_address"]))
 
     def _run_dummy_mission(self, steps: list):
         self._stop_evt.clear()   # 방어용: 이전 중단 이벤트 잔류 방지
@@ -1348,10 +1355,10 @@ class UWBApp:
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await asyncio.sleep(3.0)
 
-    async def _mission_coro(self, steps: list):
+    async def _mission_coro(self, steps: list, address: str = None):
         try:
             drone = System()
-            await drone.connect(system_address=CFG["address"])
+            await drone.connect(system_address=address or CFG["address"])
             self._log("  드론 연결 대기...")
             async for s in drone.core.connection_state():
                 if s.is_connected:
