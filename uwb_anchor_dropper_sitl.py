@@ -181,12 +181,23 @@ class GazeboMonitor:
     def _fetch(self) -> set:
         try:
             r = subprocess.run(
-                ["gz", "model", "--list", "-w", self._world],
-                capture_output=True, text=True, timeout=3
+                ["gz", "model", "--list"],
+                capture_output=True, text=True, timeout=5
             )
             if r.returncode == 0:
                 self.connected = True
-                return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+                # "Available models:" 이후 "    - <name>" 형식 파싱
+                models = set()
+                in_list = False
+                for ln in r.stdout.splitlines():
+                    if "Available models:" in ln:
+                        in_list = True
+                        continue
+                    if in_list:
+                        name = ln.strip().lstrip("- ").strip()
+                        if name:
+                            models.add(name)
+                return models
             self.connected = False
             return set()
         except Exception:
