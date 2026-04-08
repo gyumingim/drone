@@ -17,10 +17,20 @@ protobuf 호환성 주의:
 import math
 import os
 import subprocess
+import sys
 import threading
 
 # ── protobuf 호환성 패치 (gz.msgs10 은 protobuf 3.x 생성 코드) ─────────────
-os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+# ── ROS2 PYTHONPATH가 gz namespace를 덮어씌우는 문제 방지 ───────────────────
+# /usr/lib/python3/dist-packages 가 sys.path 맨 앞에 있어야 gz.transport13 임포트됨
+_sys_dist = "/usr/lib/python3/dist-packages"
+if _sys_dist not in sys.path:
+    sys.path.insert(0, _sys_dist)
+elif sys.path.index(_sys_dist) != 0:
+    sys.path.remove(_sys_dist)
+    sys.path.insert(0, _sys_dist)
 
 try:
     import cv2
