@@ -8,6 +8,78 @@
 
 ---
 
+## 전체 프로세스 흐름
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        실행 환경                             │
+│                                                             │
+│  터미널 A                    터미널 B                        │
+│  ~/drone/run_sitl_cam.sh     python3 uwb_anchor_dropper_sitl.py │
+│        │                           │                        │
+│        ▼                           ▼                        │
+│  PX4 SITL 바이너리           tkinter GUI                    │
+│  + Gazebo Harmonic               │                          │
+│  (x500_cam 모델)                 │                          │
+│        │                          │                          │
+│        │ MAVLink UDP              │ gz CLI subprocess        │
+│        │ udpin://0.0.0.0:14540    │ (앵커 spawn/despawn)    │
+│        │                          │                          │
+│        └──────── MAVSDK ──────────┘                         │
+│                                                             │
+│  gz-transport ──→ /drone/downward_cam/image ──→ camera_detector.py │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 미션 실행 흐름
+
+```
+사용자 드래그 (캔버스)
+    │
+    ▼
+smart_place_anchors()  — 지그재그 후보점 생성
+    │
+    ▼
+plan_mission()         — 디포 픽업 / 재배치 / 건너뜀 스텝 계획
+    │
+    ▼
+[미션 시작 버튼]
+    │
+    ├─ HAS_MAVSDK=False ──→ _run_dummy_mission()  (tkinter 애니메이션)
+    │
+    └─ HAS_MAVSDK=True
+         │
+         ├─ MODE=SITL ──→ _mission_coro(udpin://0.0.0.0:14540)
+         └─ MODE=REAL ──→ _mission_coro(serial:///dev/ttyACM0:57600)
+                │
+                ├─ arm → offboard → 이륙
+                ├─ 스텝별: 픽업(_real_fly_pick) → 투하(_real_fly_drop)
+                │          └─ 카메라 정렬(_cam_align) 포함
+                └─ 홈 복귀 → land
+```
+
+### 카메라 정렬 흐름 (REAL/SITL 픽업 시)
+
+```
+_real_fly_pick()
+    │
+    ├─ 목표 위치로 비행
+    ├─ 중간 고도(flight_alt/2)에서 정지
+    │
+    ▼
+_cam_align()  — 최대 8초
+    │
+    ├─ camera.get_frame()
+    ├─ detect_anchor()  — HSV 빨간색 마스크 → 컨투어 → 중심점
+    ├─ pixel_to_ned_offset()  — 픽셀 오프셋 → NED 미터 변환
+    └─ 오프셋 < 0.15m 이면 정렬 완료, 아니면 보정 이동 반복
+    │
+    ▼
+정렬된 위치로 하강 → 그리퍼 닫기
+```
+
+---
+
 ## 최종 목표 (End Goal)
 
 ```
@@ -29,57 +101,74 @@
 | GUI | Python `tkinter` |
 | 드론 제어 | `mavsdk` (offboard NED + gripper) |
 | 비동기 | `asyncio` + `threading` |
-| 시뮬레이터 | Gazebo Harmonic (`gz` CLI subprocess) |
+| 시뮬레이터 | Gazebo Harmonic (`gz` CLI + gz-transport Python) |
+| 카메라 | `camera_detector.py` — gz-transport 또는 V4L2 |
 | 좌표계 | NED (North-East-Down), alt 음수 = 위 |
-| 실행 | `python3 uwb_anchor_dropper_sitl.py` |
-
-**의존성:**
-```
-pip install mavsdk
-# Gazebo Harmonic: gz 바이너리가 PATH에 있어야 함
-```
-
-mavsdk가 없으면 자동으로 더미 시뮬레이션 모드로 동작한다.
+| Python | 시스템 `python3` (Ubuntu 22.04, Python 3.10) |
 
 ---
 
-## 주요 기능 (Features)
+## 설치 및 실행
 
-### 1. 인터랙티브 맵
-- 캔버스에 드래그 → 경로 시작점/끝점 지정
-- 실시간 앵커 배치 미리보기 (지그재그 패턴)
-- 드론·로버 위치 및 이동 궤적 시각화
+### 의존성
 
-### 2. 지그재그 앵커 배치 알고리즘 (`smart_place_anchors`)
-- 경로를 따라 `spacing`(m) 간격으로 좌우 교대 배치
-- 기존 앵커 `min_dist` 이내면 배제
-- 신규 앵커끼리는 `spacing × 0.7` 이내면 배제
+```bash
+# 시스템 패키지 (Ubuntu 22.04)
+sudo apt install python3-gz-transport13 python3-gz-msgs10 \
+                 python3-opencv python3-pil python3-pil.imagetk
 
-### 3. 로버 디포 관리
-- 로버가 초기 UWB 재고 N개를 싣고 출발
-- 재고 있으면 → **디포 픽업** (로버 위치로 날아가서 집기)
-- 재고 소진 → **스마트 재배치** 모드 자동 전환
+# pip (시스템 python3)
+pip3 install mavsdk
+pip3 install "protobuf>=5.0,<6"   # mavsdk + gz.msgs10 동시 호환
 
-### 4. 스마트 재배치 알고리즘 (`plan_mission`)
-재배치 후보 조건:
-1. 앵커의 경로 투영값 < 현재 로버 투영값 (= 로버 뒤에 있음)
-2. 기존 앵커 + 이미 설치한 신규 앵커 모두 후보
-3. 끝점(endpoint)과의 거리가 **가장 먼 것** 선택 → 공백 최소화
+# conda 사용 금지: conda protobuf가 PX4 C++ 빌드와 충돌함
+```
 
-### 5. Gazebo 연동
-- `GazeboMonitor`: 2초마다 `gz model --list` 폴링
-- 앵커 설치 시 `gz service /world/.../create` 로 SDF 모델 스폰
-- 앵커 회수 시 `gz service /world/.../remove` 로 디스폰
-- "미확인 앵커 스폰" 버튼: 기존 앵커가 Gazebo에 없으면 강제 스폰
+> `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` 은 `camera_detector.py` 에서 자동으로 설정된다.
 
-### 6. 실기체 MAVSDK 모드
-- `drone.offboard.set_position_ned()` 로 NED 좌표 이동
-- `drone.gripper.grab/release()` 또는 actuator fallback
-- 텔레메트리 비동기 스트림으로 실시간 위치 표시
+### SITL 실행 (카메라 포함)
 
-### 7. 더미 시뮬레이션 모드
-- mavsdk 없이도 동작
-- `time.sleep` 기반 애니메이션으로 임무 흐름 시각화
+```bash
+# 1회만 — x500_cam Gazebo 모델 생성
+python3 ~/drone/patch_x500_camera.py
+
+# 터미널 A: PX4 + Gazebo (x500_cam 모델)
+~/drone/run_sitl_cam.sh
+
+# 터미널 B: GUI
+python3 ~/drone/uwb_anchor_dropper_sitl.py
+```
+
+### SITL 실행 (카메라 없음, 기본 x500)
+
+```bash
+# 터미널 A
+cd ~/PX4-Autopilot && make px4_sitl gz_x500
+
+# 터미널 B
+python3 ~/drone/uwb_anchor_dropper_sitl.py
+```
+
+### 실기체 실행
+
+```bash
+# CFG["real_address"] = "serial:///dev/ttyACM0:57600" 확인 후
+# uwb_anchor_dropper_sitl.py 상단에서 MODE = "REAL" 로 변경
+python3 ~/drone/uwb_anchor_dropper_sitl.py
+```
+
+---
+
+## 파일 구조
+
+```
+drone/
+├── uwb_anchor_dropper_sitl.py   — 메인 GUI + 미션 로직
+├── camera_detector.py           — AnchorDetector (gz/V4L2 카메라)
+├── patch_x500_camera.py         — PX4 x500_cam Gazebo 모델 생성 (1회 실행)
+├── run_sitl_cam.sh              — x500_cam SITL 직접 실행 스크립트
+└── UWB_ANCHOR_DROPPER.md        — 이 문서
+```
 
 ---
 
@@ -101,12 +190,43 @@ uwb_anchor_dropper_sitl.py
     ├── _update_preview            — 슬라이더/드래그 → 미리보기 갱신
     ├── _confirm                   — 미션 시작 버튼
     ├── _run_dummy_mission         — 더미 시뮬레이션 (별도 스레드)
-    └── _mission_coro              — 실 MAVSDK 비동기 코루틴
+    ├── _mission_coro              — 실 MAVSDK 비동기 코루틴
+    ├── _real_fly_pick/drop        — REAL/SITL 비행 헬퍼
+    ├── _cam_align                 — 카메라 기반 앵커 위치 정렬
+    ├── _open_cam_window           — 독립 카메라 팝업 창
+    └── _cam_refresh               — 패널 소형 카메라 뷰 갱신 (15fps)
+
+camera_detector.py
+└── AnchorDetector
+    ├── _init_gz()              — gz-transport 구독 초기화
+    ├── _init_v4l2()            — V4L2 카메라 초기화
+    ├── detect_anchor()         — HSV 빨간색 컨투어 감지
+    ├── annotate()              — 프레임에 감지 결과 오버레이
+    ├── get_tk_image()          — tkinter PhotoImage 변환
+    └── pixel_to_ned_offset()   — 픽셀 → NED 오프셋 변환 (정적)
 ```
 
 ---
 
-## 조심해야 할 버그 & 함정
+## 주요 설정값 (CFG)
+
+| 항목 | 기본값 | 설명 |
+|------|--------|------|
+| `MODE` | `"SITL"` | `"SITL"` 또는 `"REAL"` |
+| `CFG["address"]` | `udpin://0.0.0.0:14540` | SITL MAVSDK 주소 |
+| `CFG["real_address"]` | `serial:///dev/ttyACM0:57600` | 실기체 주소 |
+| `CFG["flight_alt"]` | `-2.5` | 비행 고도 (NED m, 음수=위) |
+| `CFG["drop_alt"]` | `-0.4` | 투하/픽업 고도 |
+| `CFG["camera_source"]` | `"gz"` | `"gz"` / `"v4l2"` / `"none"` |
+| `CFG["camera_fov"]` | `90.0` | 카메라 수평 FOV (도) |
+| `CFG["cam_align_tol"]` | `0.15` | 카메라 정렬 허용 오차 (m) |
+| `ANCHOR_SPACING` | `3.5m` | 앵커 간격 (슬라이더로 변경) |
+| `DEPOT_STOCK_DEFAULT` | `3` | 로버 초기 UWB 보유 수 |
+| `COVERAGE_RADIUS` | `30.0m` | 커버리지 원 반경 (시각화용) |
+
+---
+
+## 알려진 함정 (Pitfalls)
 
 ### 1. tkinter 스레드 안전성 — **가장 중요**
 ```python
@@ -116,81 +236,32 @@ self.label.config(text="...")  # → 크래시 가능
 # 올바른 방법
 self.root.after(0, lambda: self.label.config(text="..."))
 ```
-`_run_dummy_mission`과 `GazeboMonitor._loop`은 별도 스레드에서 돌기 때문에 반드시 `root.after(0, ...)` 로만 UI 변경해야 한다.
 
-### 2. CoordMapper 고정 크기 의존
-`CoordMapper`는 `CW=720, CH=720`으로 **초기화 시 고정**된다.  
-캔버스에 `fill/expand`를 주면 실제 픽셀 크기가 달라져서 좌표가 어긋난다.  
-→ 캔버스는 항상 `pack()` (fill/expand 없이) 유지.
+### 2. protobuf 버전 충돌
+- pip protobuf ≥ 4.x는 `gz.msgs10` Python 코드(`/usr/lib/python3/dist-packages/gz/msgs10/`)와 충돌
+- `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` 으로 우회 (`camera_detector.py` 최상단에서 자동 설정)
+- conda 환경 사용 시 conda protobuf 헤더가 PX4 C++ 빌드에 섞여서 빌드 실패 → **conda 사용 금지**
 
-### 3. plan_mission 재실행 타이밍
-`_update_preview`에서 미리 계획을 세우고, `_confirm`에서 **다시** 계획을 세운다.  
-슬라이더를 바꾼 뒤 confirm을 누르면 preview와 실제 스텝이 일치하지만,  
-슬라이더 콜백(`_slider_changed`)이 `depot_remaining`을 리셋하는 것에 주의.
+### 3. make px4_sitl gz_x500_cam 빌드 실패
+- conda가 활성화된 상태에서 PX4 빌드 시 `-isystem ~/anaconda3/include` 가 추가되어 protobuf 5.x 헤더와 충돌
+- 해결: `~/drone/run_sitl_cam.sh` 사용 (기존 바이너리 직접 실행)
 
-### 4. SDF 문자열 이스케이핑 취약
-```python
-sdf = '<?xml ... name=\\"...\\">'
-```
-현재 `\\"` 방식으로 이스케이프하는데, 앵커 이름에 특수문자가 들어가면 깨진다.  
-→ 앵커 이름은 `uwb_anchor_<int>` 형식만 사용할 것.
+### 4. CoordMapper 고정 크기 의존
+- 캔버스에 `fill/expand` 주면 좌표 어긋남 → 항상 `pack()` (fill/expand 없이) 유지
 
-### 5. `reloc_new_positions` 부동소수점 비교
-```python
-reloc_pos_set = set(self.reloc_new_positions)
-if (n, e) in reloc_pos_set:
-```
-좌표가 `round(..., 2)`로 생성되므로 대부분 안전하지만,  
-직접 부동소수점 연산으로 생성된 좌표는 집합 조회에서 miss할 수 있다.
+### 5. SDF 이스케이핑
+- 앵커 이름에 특수문자 금지, `uwb_anchor_<int>` 형식만 사용
 
-### 6. asyncio + threading 혼용
-`_run_mission`은 별도 스레드에서 `asyncio.run()`을 호출한다.  
-미션 도중 창을 닫으면 `pos_task.cancel()`이 실행되지만,  
-`_mission_coro`가 `await asyncio.sleep()` 중이 아닌 `await drone.connect()` 단계면 취소가 늦어질 수 있다.  
-→ 창 종료 시 무한 대기 가능성 있음. `root.protocol("WM_DELETE_WINDOW", ...)` 처리 고려.
-
-### 7. Gazebo subprocess fire-and-forget
-`GazeboMonitor.spawn/despawn`의 실패(timeout, returncode 비정상)가 조용히 무시된다.  
-스폰 실패를 GUI에 알리지 않으므로, Gazebo가 다운된 상태에서 미션이 진행될 수 있다.
+### 6. 창 종료 시 미션 스레드 타이밍
+- `drone.connect()` 대기 중에 창을 닫으면 스레드가 즉시 종료되지 않을 수 있음
+- `_on_close()` → `_stop_evt.set()` → 다음 `await` 체크 시 종료됨
 
 ---
 
-## 깔끔하게 코드 짜는 법 (이 코드베이스 스타일)
+## TODO
 
-**순수 함수 분리**: 계획 로직(`plan_mission`, `smart_place_anchors`)은 UI 상태와 완전히 분리되어 있다. 새 알고리즘 추가 시 동일하게 순수 함수로 작성.
-
-**색상 팔레트 중앙화**: 하드코딩 금지, 반드시 `C["key"]` 사용.
-
-**로그는 `_log()`만**: 스레드 안전 처리가 내장되어 있음. `print()` 대신 `_log()` 사용.
-
-**슬라이더 추가 패턴**: `_slider()` 헬퍼 함수를 재사용하면 된다.
-
-**좌표 변환**: 모든 픽셀 ↔ 세계 좌표 변환은 `self.mapper.w2c/c2w()` 를 통해서만.
-
----
-
-## 설정값 요약 (CFG / 전역 상수)
-
-| 상수 | 기본값 | 설명 |
-|------|--------|------|
-| `CFG["address"]` | `udp://:14540` | MAVSDK 접속 주소 |
-| `CFG["flight_alt"]` | `-2.5` | 비행 고도 (NED, 음수=위) |
-| `CFG["drop_alt"]` | `-0.4` | 투하 고도 |
-| `CFG["move_wait"]` | `4.0s` | 이동 후 대기 |
-| `ANCHOR_SPACING` | `3.5m` | 앵커 간격 (슬라이더로 변경 가능) |
-| `ANCHOR_WIDTH` | `3.0m` | 좌우 폭 |
-| `MIN_DIST_FROM_EXISTING` | `8.0m` | 기존 앵커 배제 반경 |
-| `DEPOT_STOCK_DEFAULT` | `3` | 로버 초기 UWB 보유 수 |
-| `COVERAGE_RADIUS` | `30.0m` | 커버리지 원 반경 (시각화용) |
-| `MAP_N / MAP_E` | `(-2, 20)` | 맵 표시 범위 (미터) |
-
----
-
-## 앞으로 만들어야 할 것 (TODO)
-
-- [ ] 창 종료 시 미션 스레드 안전 종료 처리
-- [ ] Gazebo spawn 실패 시 재시도 또는 UI 경고
-- [ ] 앵커 ID 충돌 방지 (재배치 후 재스폰 시 id 중복 가능)
-- [ ] 경로 여러 개 지원 (현재 단일 경로만 가능)
-- [ ] 실기체에서의 gripper 피드백 확인 로직
+- [ ] 경로 여러 개 지원 (현재 단일 경로만)
+- [ ] 실기체 gripper 피드백 확인 로직
 - [ ] ROS 2 토픽으로 로버 실제 위치 수신 연동
+- [ ] Gazebo spawn 실패 시 재시도 또는 UI 경고
+- [ ] `reloc_new_positions` 부동소수점 집합 비교 → epsilon 비교로 개선
