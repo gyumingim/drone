@@ -7,11 +7,20 @@ camera_detector.py — UWB 앵커 카메라 감지 모듈
   "none"  — 비활성화
 
 의존성:
-  pip install opencv-python pillow
+  conda install -c conda-forge opencv pillow
   (Gazebo 사용 시) python3-gz-transport13 / python3-gz-msgs10
+
+protobuf 호환성 주의:
+  pip protobuf >= 4.x 는 gz.msgs10 과 충돌함.
+  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python 으로 우회.
 """
 import math
+import os
+import subprocess
 import threading
+
+# ── protobuf 호환성 패치 (gz.msgs10 은 protobuf 3.x 생성 코드) ─────────────
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 try:
     import cv2
@@ -26,20 +35,65 @@ try:
 except ImportError:
     HAS_PIL = False
 
-# Gazebo Harmonic gz-transport Python 바인딩 (버전별 자동 탐색)
+# ── Gazebo Harmonic gz-transport Python 바인딩 (버전별 자동 탐색) ──────────
 HAS_GZ_TRANSPORT = False
 _gz_transport = None
 _GzImage      = None
+_GZ_VERSION   = None
 
-for _v in (13, 14, 12):
+for _v in (13, 14, 12, 11):
     try:
         _gz_transport = __import__(f"gz.transport{_v}", fromlist=["Node"])
-        _msgs = __import__(f"gz.msgs{_v - 3}", fromlist=["image_pb2"])
+        _msgs_v = _v - 3
+        _msgs = __import__(f"gz.msgs{_msgs_v}", fromlist=["image_pb2"])
         _GzImage = _msgs.image_pb2.Image
         HAS_GZ_TRANSPORT = True
+        print(f"[Camera] gz.transport{_v} + gz.msgs{_msgs_v} 로드 완료")
         break
     except Exception:
         pass
+
+if not HAS_GZ_TRANSPORT:
+    print("[Camera] gz-transport Python 바인딩 없음 (python3-gz-transport13 필요)")
+
+
+def _gz_topic_list() -> list[str]:
+    """현재 Gazebo에서 퍼블리시 중인 토픽 목록 반환."""
+    try:
+        r = subprocess.run(["gz", "topic", "-l"],
+                           capture_output=True, text=True, timeout=3)
+        return [t.strip() for t in r.stdout.splitlines() if t.strip()]
+    except Exception:
+        return []
+
+
+def _find_image_topic(preferred: str) -> str:
+    """
+    preferred 토픽이 존재하면 그대로 사용.
+    없으면 Gazebo 토픽 목록에서 image 토픽을 자동 탐색.
+    """
+    topics = _gz_topic_list()
+    if preferred in topics:
+        return preferred
+
+    # 선호 토픽 없음 → 자동 탐색 (image 포함 토픽)
+    image_topics = [t for t in topics if "image" in t.lower()
+                    and "camera" not in t.lower().replace("/camera_link", "")]
+    if image_topics:
+        chosen = image_topics[0]
+        print(f"[Camera] 토픽 자동 탐색: {preferred} 없음 → {chosen} 사용")
+        return chosen
+
+    # 전체 image 포함 토픽
+    image_topics2 = [t for t in topics if "image" in t.lower()]
+    if image_topics2:
+        chosen = image_topics2[0]
+        print(f"[Camera] 토픽 자동 탐색 (fallback): {chosen} 사용")
+        return chosen
+
+    print(f"[Camera] 이미지 토픽 없음. 사용 가능한 토픽:\n  " +
+          "\n  ".join(topics[:15]) if topics else "  (Gazebo 미실행)")
+    return preferred   # 없어도 일단 구독 시도
 
 
 class AnchorDetector:
@@ -64,9 +118,10 @@ class AnchorDetector:
 
         if self.source == "gz":
             if HAS_GZ_TRANSPORT:
-                self._init_gz(gz_topic or self.DEFAULT_GZ_TOPIC)
+                topic = _find_image_topic(gz_topic or self.DEFAULT_GZ_TOPIC)
+                self._init_gz(topic)
             else:
-                print("[Camera] gz-transport Python 바인딩 미설치 → 비활성화")
+                print("[Camera] gz-transport 없음 → 비활성화")
                 self.source = "none"
         elif self.source == "v4l2":
             self._init_v4l2(v4l2_device)
@@ -78,6 +133,7 @@ class AnchorDetector:
             self._node = _gz_transport.Node()
             self._node.subscribe(_GzImage, topic, self._on_gz_image)
             self.ok = True
+            self._gz_topic = topic
             print(f"[Camera] Gazebo 카메라 구독: {topic}")
         except Exception as e:
             print(f"[Camera] Gazebo 초기화 실패: {e}")
