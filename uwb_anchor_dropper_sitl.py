@@ -70,7 +70,7 @@ except ImportError:
 MODE = "SITL"
 
 CFG = {
-    "address"         : "udp://:14540",                  # SITL: Gazebo PX4
+    "address"         : "udpin://0.0.0.0:14540",           # SITL: Gazebo PX4
     "real_address"    : "serial:///dev/ttyACM0:57600",   # REAL: 실제 드론
     "flight_alt"      : -2.5,
     "drop_alt"        : -0.4,
@@ -1468,6 +1468,7 @@ class UWBApp:
         await asyncio.sleep(3.0)
 
     async def _mission_coro(self, steps: list, address: str = None):
+        pos_task = None   # finally 블록에서 NameError 방지
         try:
             drone = System()
             await drone.connect(system_address=address or CFG["address"])
@@ -1544,15 +1545,21 @@ class UWBApp:
                 self._log(f"  → 설치 @ ({t_n:.1f},{t_e:.1f})")
                 self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
                 await self._real_fly_drop(drone, t_n, t_e, anchor)
+                self.root.after(0, lambda nm=anchor["name"]: self._mark_installed(nm))
 
-            h_n, h_e = self.drone_home
-            self._log("\n홈 복귀...")
-            await drone.offboard.set_position_ned(
-                PositionNedYaw(h_n, h_e, CFG["flight_alt"], 0.))
-            await self._wait_reach(drone, h_n, h_e)
-            await drone.offboard.stop()
-            await drone.action.land()
-            self._log("✅ 임무 완료!")
+            if not self._stop_evt.is_set():
+                h_n, h_e = self.drone_home
+                self._log("\n홈 복귀...")
+                await drone.offboard.set_position_ned(
+                    PositionNedYaw(h_n, h_e, CFG["flight_alt"], 0.))
+                await self._wait_reach(drone, h_n, h_e)
+                await drone.offboard.stop()
+                await drone.action.land()
+                self._log("✅ 임무 완료!")
+            else:
+                self._log("⏹ 중단됨 → 긴급 착지")
+                await drone.offboard.stop()
+                await drone.action.land()
 
         except Exception as ex:
             self._log(f"❌ {ex}")
@@ -1569,8 +1576,8 @@ class UWBApp:
             except Exception:
                 pass
         finally:
-            try: pos_task.cancel()
-            except Exception: pass
+            if pos_task:
+                pos_task.cancel()
             self.root.after(0, self._clear_drone_pos)
             self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
