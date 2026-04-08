@@ -113,6 +113,9 @@ _cam_align()  — 최대 8초
 ### 의존성
 
 ```bash
+# ⚠️ conda 반드시 비활성화 먼저!
+conda deactivate
+
 # 시스템 패키지 (Ubuntu 22.04)
 sudo apt install python3-gz-transport13 python3-gz-msgs10 \
                  python3-opencv python3-pil python3-pil.imagetk
@@ -120,9 +123,11 @@ sudo apt install python3-gz-transport13 python3-gz-msgs10 \
 # pip (시스템 python3)
 pip3 install mavsdk
 pip3 install "protobuf>=5.0,<6"   # mavsdk + gz.msgs10 동시 호환
-
-# conda 사용 금지: conda protobuf가 PX4 C++ 빌드와 충돌함
 ```
+
+> **conda가 활성화된 상태(`(base)`)에서 실행하면 카메라가 동작하지 않는다.**
+> conda는 protobuf를 C extension 모드로 먼저 로드해버려서 gz.msgs10 import가 실패함.
+> 터미널을 열 때마다 `conda deactivate` 후 실행할 것.
 
 > `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` 은 `camera_detector.py` 에서 자동으로 설정된다.
 
