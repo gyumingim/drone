@@ -30,6 +30,13 @@
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+import os
+# ── 반드시 모든 import 전에 설정 ─────────────────────────────────────────────
+# mavsdk/gz.msgs10 둘 다 protobuf를 쓰는데, C extension 모드로 먼저 로드되면
+# gz.msgs10(protobuf 3.x 생성 코드)이 "Descriptors cannot be created" 에러남.
+# 환경변수를 여기서 설정하면 protobuf가 pure-python 모드로 초기화됨.
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 import tkinter as tk
 from tkinter import scrolledtext
 import asyncio
