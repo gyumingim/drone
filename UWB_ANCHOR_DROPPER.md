@@ -313,7 +313,17 @@ self.root.after(0, lambda: self.label.config(text="..."))
 ### 5. SDF 이스케이핑
 - 앵커 이름에 특수문자 금지, `uwb_anchor_<int>` 형식만 사용
 
-### 6. 창 종료 시 미션 스레드 타이밍
+### 6. VisionPositionInjector 포트 — **SITL 전용**
+- PX4 SITL MAVLink 포트 구조 (`px4-rc.mavlink` 기준):
+  ```
+  mavlink start -u 14580 -o 14540   ← PX4가 14580에서 수신, 14540으로 전송
+  MAVSDK: udpin://0.0.0.0:14540     ← MAVSDK가 14540 점유
+  ```
+- `udpout:127.0.0.1:14540` → MAVSDK로 전송됨 (PX4 못 받음) → **포트는 14580 사용**
+- REAL 모드에서는 PX4가 시리얼에 있으므로 localhost UDP 불가 → 자동 비활성화됨
+- REAL 모드 vision 주입 필요 시: FC에 Ethernet/WiFi UDP MAVLink 포트 설정 후 CFG 수정
+
+### 7. 창 종료 시 미션 스레드 타이밍
 - `drone.connect()` 대기 중에 창을 닫으면 스레드가 즉시 종료되지 않을 수 있음
 - `_on_close()` → `_stop_evt.set()` → 다음 `await` 체크 시 종료됨
 

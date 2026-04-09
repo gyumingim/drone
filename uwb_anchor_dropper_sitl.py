@@ -76,7 +76,7 @@ except ImportError:
         def __init__(self, **kw): pass
         def start(self): pass
         def stop(self): pass
-        def get_position(self): return None
+        def get_position(self, max_age=2.0): return None
         def get_distances(self): return {}
         def get_quality(self): return {"sigma": (999,999,999)}
         def set_sitl_drone_pos(self, n, e, z): pass
@@ -124,7 +124,12 @@ CFG = {
     "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
     # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
     "vision_inject"   : True,     # True: UWB 위치를 PX4 EKF2에 주입
-    "vision_port"     : 14540,    # PX4 메인 MAVLink 포트 (MAVSDK와 동일)
+    # PX4 SITL 포트 구조 (px4-rc.mavlink 확인):
+    #   mavlink start -u 14580 -o 14540  ← PX4가 14580에 바인드(수신), 14540으로 전송
+    #   MAVSDK udpin://0.0.0.0:14540     ← MAVSDK가 14540에서 수신
+    # 따라서 vision 데이터는 14580(PX4 수신 포트)으로 전송해야 함.
+    # 14540으로 보내면 MAVSDK가 받고 PX4는 못 받음.
+    "vision_port"     : 14580,    # PX4 SITL onboard 수신 포트
     "vision_rate_hz"  : 30,       # 주입 Hz
 }
 
@@ -222,7 +227,7 @@ class VisionPositionInjector:
       없으면 PX4가 해당 소스를 신뢰하지 않을 수 있음.
     """
 
-    def __init__(self, uwb, port: int = 14540, rate_hz: float = 30):
+    def __init__(self, uwb, port: int = 14580, rate_hz: float = 30):
         self._uwb         = uwb
         self._port        = port
         self._period      = 1.0 / max(rate_hz, 1)
@@ -244,16 +249,26 @@ class VisionPositionInjector:
             print("[Vision] pymavlink 없음 → EKF2 주입 비활성화"
                   " (pip install pymavlink)")
             return
+        if MODE == "REAL":
+            # REAL 모드: PX4는 시리얼(/dev/ttyACM0)에 연결됨.
+            # localhost UDP로는 PX4에 도달 불가.
+            # FC에 UDP MAVLink 포트가 있다면 CFG["vision_host"]와
+            # CFG["vision_port"]를 FC의 IP:PORT로 변경해야 함.
+            # 현재는 SITL 전용. REAL 모드는 비활성화.
+            print("[Vision] REAL 모드: UDP localhost → FC 불가. vision 주입 비활성화.")
+            print("[Vision]  → FC에 UDP 포트 있으면 CFG['vision_host']에 FC IP 설정 필요.")
+            return
         try:
             # udpout: pymavlink이 해당 포트로 패킷 전송
-            # PX4 SITL은 14540(onboard)·14550(GCS) 양쪽에서 수신 가능
+            # PX4 SITL: 14580 = PX4 onboard MAVLink 로컬 수신 포트
+            # (px4-rc.mavlink: mavlink start -u 14580 -o 14540)
             self._mav = _mavutil.mavlink_connection(
                 f"udpout:127.0.0.1:{self._port}",
                 source_system=1,           # PX4 sysid와 같은 시스템
                 source_component=195)      # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
             self._running = True
             self.ok = True
-            # 수신 스레드: PX4 HEARTBEAT → time_boot_ms 동기화
+            # 수신 스레드: PX4 → time_boot_ms 동기화
             threading.Thread(target=self._recv_loop, daemon=True).start()
             # 송신 스레드: VISION_POSITION_ESTIMATE + HEARTBEAT
             threading.Thread(target=self._send_loop, daemon=True).start()
@@ -269,8 +284,9 @@ class VisionPositionInjector:
 
     def _recv_loop(self):
         """
-        PX4로부터 HEARTBEAT를 수신해 타임스탬프를 동기화.
-        udpout 연결은 첫 send 이후 PX4가 우리 주소를 알게 되어 양방향 통신 가능.
+        PX4로부터 time_boot_ms 포함 메시지(SYSTEM_TIME, ATTITUDE 등)를 수신해
+        타임스탬프를 동기화. udpout 연결은 첫 send 이후 PX4가 우리 주소를
+        알게 되어 양방향 통신 가능.
         """
         while self._running:
             try:
