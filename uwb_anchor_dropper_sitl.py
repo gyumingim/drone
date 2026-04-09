@@ -103,11 +103,9 @@ CFG = {
     "real_address"    : "serial:///dev/ttyACM0:57600",   # REAL: 실제 드론
     "flight_alt"      : -2.5,
     "drop_alt"        : -0.4,
-    "move_wait"       : 4.0,
     "takeoff_wait"    : 5.0,
     "drop_wait"       : 1.5,
     "gripper_actuator": 1,
-    "spawn_markers"   : True,
     "gz_world"        : "default",
     # 카메라 설정
     "camera_source"   : "gz",     # "gz" | "v4l2" | "none"
@@ -119,7 +117,6 @@ CFG = {
     # UWB 설정
     "uwb_port"        : "/dev/ttyACM0",  # 실기체: DWM3001C 시리얼 포트
     "uwb_baud"        : 115200,
-    "uwb_mode"        : "text",   # "text" | "tlv"
     "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
     # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
     # MAVSDK mocap API 사용: drone 연결 재사용, REAL/SITL 공통 동작
@@ -521,7 +518,6 @@ class UWBApp:
         self.uwb = UWBLocalizer(
             port=CFG["uwb_port"],
             baud=CFG["uwb_baud"],
-            mode=CFG["uwb_mode"],
             sitl=use_sitl_uwb,
             sitl_anchors=sitl_anchors,
             anchor_ned_map=anchor_ned_map,

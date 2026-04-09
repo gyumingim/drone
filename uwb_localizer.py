@@ -27,7 +27,6 @@ import math
 import random
 import threading
 import time
-import struct
 
 try:
     import serial
@@ -238,18 +237,6 @@ class UWBPositionEKF:
         self.x += K * innov
         self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
 
-    def update_velocity(self, vel: np.ndarray, sigma_vel: float = 0.1):
-        """비행 컨트롤러 속도로 속도 상태 직접 보정."""
-        if not self._ok():
-            return
-        for i in range(3):
-            H    = np.zeros(6)
-            H[3+i] = 1.0
-            S    = float(H @ self.P @ H) + sigma_vel ** 2
-            K    = self.P @ H / S
-            self.x += K * (vel[i] - self.x[3+i])
-            self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
-
     def initialize_from_trilateration(self, pos: tuple):
         if not self._ok():
             return
@@ -316,39 +303,6 @@ def parse_dist_line(line: str) -> dict | None:
         return None
 
 
-def parse_tlv_response(data: bytes) -> dict | None:
-    """DWM3001C TLV 바이너리 응답 파싱."""
-    result = {"pos": None, "distances": {}}
-    i = 0
-    while i + 2 <= len(data):
-        t      = data[i]
-        length = data[i + 1]
-        if i + 2 + length > len(data):
-            break
-        val = data[i + 2: i + 2 + length]
-        if t == 0x41 and length >= 13:
-            x, y, z = struct.unpack_from("<iii", val, 0)
-            qf = val[12]
-            result["pos"] = (x/1000., y/1000., z/1000., qf)
-        elif t == 0x49 and length >= 1:
-            cnt = val[0]
-            off = 1
-            for _ in range(cnt):
-                if off + 20 > len(val):
-                    break
-                addr    = struct.unpack_from("<H", val, off)[0]
-                dist_mm = struct.unpack_from("<I", val, off + 2)[0]
-                qf      = val[off + 6]
-                ax, ay, az = struct.unpack_from("<iii", val, off + 7)
-                result["distances"][f"{addr:04X}"] = {
-                    "dist_m": dist_mm / 1000.,
-                    "pos"   : (ax/1000., ay/1000., az/1000.),
-                    "qf"    : qf,
-                }
-                off += 20
-        i += 2 + length
-    return result if (result["pos"] or result["distances"]) else None
-
 
 # ════════════════════════════════════════════════════════════════
 #  UWBLocalizer
@@ -368,7 +322,6 @@ class UWBLocalizer:
     def __init__(self,
                  port: str = "/dev/ttyACM0",
                  baud: int = 115200,
-                 mode: str = "text",
                  sitl: bool = False,
                  sitl_anchors: list = None,
                  anchor_ned_map: dict = None,
@@ -379,7 +332,6 @@ class UWBLocalizer:
 
         self.port  = port
         self.baud  = baud
-        self.mode  = mode
         self.sitl  = sitl
         self._anchor_ned_map = anchor_ned_map or {}
 
@@ -534,27 +486,12 @@ class UWBLocalizer:
     # ── 시리얼 루프 ───────────────────────────────────────────────
 
     def _serial_loop(self):
-        buf = b""
         while self._running:
             try:
-                if self.mode == "text":
-                    line = (self._ser.readline()
-                            .decode("utf-8", errors="ignore").strip())
-                    if line:
-                        self._process_text(line)
-                else:
-                    # TLV 모드: 바이트 누적 후 완전한 패킷만 파싱
-                    # 256바이트 고정 청크 대신 1바이트씩 읽어 버퍼 경계 보장
-                    chunk = self._ser.read(1)
-                    if chunk:
-                        buf += chunk
-                    # 버퍼가 너무 커지면 오래된 데이터 폐기 (프레임 동기 손실)
-                    if len(buf) > 512:
-                        buf = buf[-256:]
-                    result = parse_tlv_response(buf)
-                    if result:
-                        self._apply_result(result)
-                        buf = b""  # 완전한 패킷 처리 후 버퍼 초기화
+                line = (self._ser.readline()
+                        .decode("utf-8", errors="ignore").strip())
+                if line:
+                    self._process_text(line)
             except Exception as e:
                 if self._running:
                     print(f"[UWB] 시리얼 에러: {e}")
@@ -580,7 +517,7 @@ class UWBLocalizer:
         # 위치 결정
         pos = None
         if raw_pos:
-            pos = self._uwb_to_ned(raw_pos[0], raw_pos[1], raw_pos[2])
+            pos = (float(raw_pos[0]), float(raw_pos[1]), float(raw_pos[2]))
             if not self._ekf.initialized and HAS_SCIPY:
                 self._ekf.initialize_from_trilateration(pos)
             elif HAS_SCIPY:
@@ -669,9 +606,6 @@ class UWBLocalizer:
         if uwb_pos:
             return float(uwb_pos[0]), float(uwb_pos[1]), float(uwb_pos[2])
         return None
-
-    def _uwb_to_ned(self, x, y, z):
-        return (float(x), float(y), float(z))
 
     # ── SITL 시뮬 루프 ────────────────────────────────────────────
 
