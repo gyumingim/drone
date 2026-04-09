@@ -1599,8 +1599,8 @@ class UWBApp:
         REAL 모드(GPS 없음): UWB 위치 기반.
         SITL 모드: PX4 텔레메트리 기반.
         """
-        if MODE == "REAL" and HAS_UWB:
-            # GPS 없는 실기체 — UWB 위치로 도달 확인
+        if HAS_UWB:
+            # SITL/REAL 모두 UWB 위치로 도달 확인 (GPS 불필요)
             t0 = time.monotonic()
             while time.monotonic() - t0 < timeout:
                 pos = self.uwb.get_position()
@@ -1611,7 +1611,7 @@ class UWBApp:
                 await asyncio.sleep(0.1)
             self._log(f"  ⚠ UWB 이동 타임아웃 ({timeout:.0f}s) — 계속 진행")
             return
-        # SITL / GPS 사용: PX4 텔레메트리
+        # UWB 없을 때 fallback: PX4 텔레메트리
         t0 = asyncio.get_running_loop().time()
         async for pv in drone.telemetry.position_velocity_ned():
             dist = math.hypot(pv.position.north_m - n, pv.position.east_m - e)
@@ -1731,14 +1731,14 @@ class UWBApp:
             try:
                 await drone.param.set_param_int("NAV_RCL_ACT", 0)
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
-                # GPS-denied: vision position을 EKF2 소스로 활성화
-                # EKF2_AID_MASK: bit3=8 (vision pos), bit0=1 (GPS)
-                # REAL 모드(화성): GPS 완전 비활성 → 8 only
-                # SITL 모드: GPS + vision → 9 (안전하게 둘 다)
-                aid_mask = 9 if MODE == "SITL" else 8
-                await drone.param.set_param_int("EKF2_AID_MASK", aid_mask)
+                # GPS-denied: vision position만 EKF2 소스로 사용
+                # EKF2_AID_MASK: bit3=8 (vision pos only), bit0=1 (GPS)
+                # SITL/REAL 모두 GPS 끄고 UWB vision만 사용
+                await drone.param.set_param_int("EKF2_AID_MASK", 8)
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
-                self._log(f"  EKF2_AID_MASK={aid_mask}  EV_DELAY=25ms 설정")
+                # GPS 완전 비활성화
+                await drone.param.set_param_int("NAV_GNSS_MASK", 0)
+                self._log("  EKF2_AID_MASK=8 (GPS off, vision only)  EV_DELAY=25ms")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
