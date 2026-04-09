@@ -1727,24 +1727,39 @@ class UWBApp:
                 if s.is_connected:
                     self._log("  ✅ 연결됨"); break
 
-            # GCS 연결 없이도 arm 허용 (SITL/오프보드 전용)
+            # PX4 파라미터: GPS-denied + UWB vision 위치 소스
             try:
                 await drone.param.set_param_int("NAV_RCL_ACT", 0)
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
-                # GPS-denied: vision position만 EKF2 소스로 사용
-                # EKF2_AID_MASK: bit3=8 (vision pos only), bit0=1 (GPS)
-                # SITL/REAL 모두 GPS 끄고 UWB vision만 사용
-                await drone.param.set_param_int("EKF2_AID_MASK", 8)
-                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                # GPS 없이 arm 허용
+                await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 # GPS 완전 비활성화
                 await drone.param.set_param_int("NAV_GNSS_MASK", 0)
-                self._log("  EKF2_AID_MASK=8 (GPS off, vision only)  EV_DELAY=25ms")
+                # EKF2: vision position만 사용 (bit3=8)
+                await drone.param.set_param_int("EKF2_AID_MASK", 8)
+                # vision 수신 지연 보정 (pymavlink UDP 지연)
+                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                # vision 최소 품질 기준 완화 (covariance 허용 범위)
+                await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
+                self._log("  ✅ 파라미터: GPS off, vision only, ARM_WO_GPS=1")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
+            # EKF2_AID_MASK 변경 후 EKF 리셋 대기
+            # vision 메시지가 PX4에 도달해서 EKF가 수렴할 시간
+            self._log("  UWB vision 수렴 대기 (3s)...")
+            await asyncio.sleep(3.0)
+
+            # is_local_position_ok 타임아웃 (Vision 없으면 무한 대기 방지)
+            self._log("  로컬 포지션 대기...")
+            t_health = asyncio.get_running_loop().time()
             async for h in drone.telemetry.health():
                 if h.is_local_position_ok:
-                    self._log("  ✅ 로컬 포지션 OK"); break
+                    self._log("  ✅ 로컬 포지션 OK (UWB vision 수신됨)"); break
+                if asyncio.get_running_loop().time() - t_health > 15.0:
+                    self._log("  ⚠ 로컬 포지션 타임아웃 — vision 미수신"
+                              " (VisionPositionInjector 확인 필요)")
+                    break
 
             pos_task = asyncio.create_task(self._telemetry_task(drone))
             await drone.action.arm()
