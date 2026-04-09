@@ -993,7 +993,8 @@ class UWBApp:
         # 7) 재배치 화살표
         self._draw_reloc_arrows()
 
-        # 8) 기존 앵커
+        # 8) 기존 앵커 (UWB 건강 상태 색상 반영)
+        anch_health = self.uwb.get_quality().get("anchor_health", {})
         for a in EXISTING_ANCHORS:
             cx, cy = m.w2c(a["n"], a["e"])
             r = 9
@@ -1006,19 +1007,34 @@ class UWBApp:
                 self.canvas.create_text(cx, cy-16, text=f"A{a['id']}→",
                                          fill=C["relocated"], font=("Courier", 8))
             else:
+                col = C["gz_ok"]  # 기본: 빨강
+                # SIM ID로 건강 상태 매핑 (SITL: SIM0, SIM1, ...)
+                sim_id = f"SIM{list(EXISTING_ANCHORS).index(a)}"
+                h = anch_health.get(sim_id, {})
+                if h:
+                    if not h.get("ok", True):
+                        # NLOS/오배치 의심: 주황색 + 경고 링
+                        col = "#ff8844"
+                        self.canvas.create_oval(cx-r-4, cy-r-4, cx+r+4, cy+r+4,
+                                                 outline="#ff4400", width=1,
+                                                 dash=(3, 2))
                 self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                         fill=C["gz_ok"], outline="white", width=1)
+                                         fill=col, outline="white", width=1)
                 self.canvas.create_text(cx, cy, text=str(a["id"]),
                                          fill="white", font=("Courier", 8, "bold"))
-                self.canvas.create_text(cx, cy-16, text=f"A{a['id']}",
-                                         fill=C["gz_ok"], font=("Courier", 8))
+                lbl = f"A{a['id']}"
+                if h and not h.get("ok", True):
+                    lbl += "⚠"
+                self.canvas.create_text(cx, cy-16, text=lbl,
+                                         fill=col, font=("Courier", 8))
 
-        # 9) 신규 앵커
+        # 9) 신규 앵커 (설치 완료 앵커에 건강 상태 표시)
         reloc_pos_set = set(self.reloc_new_positions)
+        n_existing = len(EXISTING_ANCHORS)
         for i, (n, e) in enumerate(self.preview):
             cx, cy = m.w2c(n, e)
             r   = 8
-            aid = len(EXISTING_ANCHORS) + i + 1
+            aid = n_existing + i + 1
             nm  = f"uwb_anchor_{aid}"
 
             if (n, e) in reloc_pos_set:
@@ -1030,7 +1046,17 @@ class UWBApp:
                 continue
 
             if nm in self.installed_new:
-                col, lbl = C["gz_ok"],      "✓"
+                col = C["gz_ok"]
+                lbl = "✓"
+                # SITL 인덱스: 기존 앵커 다음부터
+                sim_id = f"SIM{n_existing + i}"
+                h = anch_health.get(sim_id, {})
+                if h and not h.get("ok", True):
+                    col = "#ff8844"
+                    lbl = "⚠"
+                    self.canvas.create_oval(cx-r-4, cy-r-4, cx+r+4, cy+r+4,
+                                             outline="#ff4400", width=1,
+                                             dash=(3, 2))
             elif nm in self.installing:
                 col, lbl = C["installing"], "↓"
             else:
@@ -1926,12 +1952,16 @@ class UWBApp:
         self.root.after(66, self._cam_refresh)
 
     def _uwb_refresh(self):
-        """500ms마다 UWB 위치 표시 갱신."""
+        """500ms마다 UWB 위치 + 품질 표시 갱신."""
         pos   = self.uwb.get_position()
         dists = self.uwb.get_distances()
+        qual  = self.uwb.get_quality()
+        sn, se, sz = qual["sigma"]
+
         if pos:
             self.uwb_pos_lbl.config(
-                text=f"📡 UWB: N:{pos[0]:.2f} E:{pos[1]:.2f} Z:{pos[2]:.2f}",
+                text=(f"📡 N:{pos[0]:.2f} E:{pos[1]:.2f} Z:{pos[2]:.2f}"
+                      f"  σ({sn:.2f},{se:.2f})"),
                 fg="#a0d8ff")
         elif dists:
             self.uwb_pos_lbl.config(
@@ -1939,6 +1969,17 @@ class UWBApp:
                 fg=C["rover"])
         else:
             self.uwb_pos_lbl.config(text="📡 UWB: 대기", fg=C["dim"])
+
+        # 앵커 건강 경고 로그 (새로 나빠진 앵커만)
+        health = qual.get("anchor_health", {})
+        for aid, h in health.items():
+            prev = getattr(self, "_last_anchor_health", {}).get(aid, {})
+            if not h["ok"] and prev.get("ok", True):
+                self._log(f"  ⚠ 앵커 {aid} 품질 저하:"
+                          f" mean={h['mean']:+.3f}m std={h['std']:.3f}m"
+                          f" (NLOS/오배치 의심)", "warn")
+        self._last_anchor_health = health
+
         self.root.after(500, self._uwb_refresh)
 
     def _on_close(self):
