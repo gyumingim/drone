@@ -246,44 +246,36 @@ camera_detector.py
 
 ## 수정 이력 (Changelog)
 
-### 2026-04-09 — SITL→REAL 전환 안정화
+### 2026-04-09 — VisionPositionInjector 제거 및 코드 정리
 
-**🔴 Critical 버그 수정**
+**🔴 REAL 모드 GPS-denied 비행 수정**
 
-1. **VisionPositionInjector 타임스탬프 버그 수정**
-   - 기존: `time.time() * 1e6` (UNIX 에포크 기반 → PX4 boot time 대비 1.7×10¹² 차이)
-   - 수정: PX4 `SYSTEM_TIME` / `LOCAL_POSITION_NED` 등 `time_boot_ms` 포함 메시지 수신해 동기화
-   - 주의: MAVLink `HEARTBEAT`에는 `time_boot_ms` 없음 (필드 자체가 정의 안 됨)
-   - 원인: EKF2가 미래 타임스탬프로 판단해 모든 vision 측정 거부
+1. **VisionPositionInjector → MAVSDK mocap API 교체**
+   - 기존: `VisionPositionInjector` 클래스 — pymavlink UDP로 VISION_POSITION_ESTIMATE 주입.  
+     REAL 모드에서 `if MODE == "REAL": return` 으로 **자동 비활성화**되어 vision 주입이 무음 실패.  
+     포트 충돌 (MAVSDK가 이미 시리얼 점유) + 타임스탬프 불일치 문제 상존.
+   - 수정: `drone.mocap.set_vision_position_estimate()` (MAVSDK mocap 플러그인).  
+     기존 MAVSDK 연결(SITL=UDP, REAL=시리얼)을 그대로 재사용 → 포트 충돌 없음.  
+     `time.monotonic() * 1e6` — PX4 boot_time 기준과 단조 증가 일치.
+   - 결과: SITL/REAL 공통 경로로 GPS-denied offboard 비행 가능.
 
-2. **VisionPositionInjector 하트비트 추가**
-   - 기존: VISION_POSITION_ESTIMATE 만 전송
-   - 수정: 1Hz MAVLink heartbeat 추가 (MAV_TYPE_ONBOARD_CONTROLLER)
-   - 원인: MAVLink 스펙상 하트비트 없으면 PX4가 소스를 신뢰하지 않을 수 있음
+**🟡 코드 간소화**
 
-**🟡 Important 수정**
+2. **TLV 모드 제거 (텍스트 전용)**
+   - 기존: `uwb_localizer.py`에 TLV 바이너리 파서(`parse_tlv_response`)와 `_serial_loop` 분기 공존
+   - 수정: DWM3001C 텍스트 모드 (`DIST,3,AN0,...,POS,x,y,z`)만 지원
+   - 이유: 실 운용에서 텍스트 모드만 사용. TLV 코드는 미사용 데드코드였음.
 
-3. **EKF2 파라미터 PX4 v1.14+ 호환성**
-   - 기존: `EKF2_AID_MASK=8` (PX4 v1.13 이하 구API)
-   - 수정: `EKF2_EV_CTRL=3, EKF2_GPS_CTRL=0, EKF2_HGT_REF=3` (v1.14+ 신API) + fallback
-   - 원인: v1.14에서 EKF2_AID_MASK deprecated, EV_CTRL로 분리됨
+3. **미사용 메서드 / CFG 키 제거**
+   - `UWBLocalizer.update_velocity()` — 호출되지 않던 EKF 속도 업데이트
+   - `UWBLocalizer._uwb_to_ned()` — 단순 형변환 래퍼, 인라인 처리
+   - CFG: `vision_port`, `vision_inject`, `move_wait`, `spawn_markers`, `uwb_mode` 제거
 
-4. **EKF2_HGT_REF=3 추가** (EV 고도 기준)
-   - GPS 없는 환경에서 EKF Z 안정화. 기압계만으로는 실내에서 드리프트.
+**🟢 EKF2 파라미터 설정 (기존 적용)**
 
-5. **UWB 위치 신선도(staleness) 체크**
-   - 기존: UWB 끊겨도 마지막 위치 값을 계속 반환
-   - 수정: `get_position(max_age=2.0)` — 2초 이상 갱신 없으면 None 반환
-   - 원인: `_wait_reach`에서 stale 위치로 목표 도달 오판 가능
-
-6. **Vision reset_counter**
-   - 1m 이상 위치 점프 감지 시 reset_counter 증가 → EKF2에게 리셋 요청
-
-**🟢 Minor 수정**
-
-7. **TLV 시리얼 버퍼 처리 개선**
-   - 기존: 256바이트 고정 청크 읽기 → 프레임 경계 불일치 시 파싱 실패
-   - 수정: 1바이트 누적 + 512바이트 초과 시 오래된 데이터 폐기
+4. **PX4 v1.14+ 호환 파라미터**
+   - `EKF2_EV_CTRL=3` (pos+yaw fusion), `EKF2_GPS_CTRL=0` (GPS off), `EKF2_HGT_REF=3` (EV 고도)
+   - `COM_ARM_WO_GPS=1` — GPS 없이 ARM 허용 (EKF2 position source는 vision으로 대체)
 
 ---
 
@@ -313,15 +305,11 @@ self.root.after(0, lambda: self.label.config(text="..."))
 ### 5. SDF 이스케이핑
 - 앵커 이름에 특수문자 금지, `uwb_anchor_<int>` 형식만 사용
 
-### 6. VisionPositionInjector 포트 — **SITL 전용**
-- PX4 SITL MAVLink 포트 구조 (`px4-rc.mavlink` 기준):
-  ```
-  mavlink start -u 14580 -o 14540   ← PX4가 14580에서 수신, 14540으로 전송
-  MAVSDK: udpin://0.0.0.0:14540     ← MAVSDK가 14540 점유
-  ```
-- `udpout:127.0.0.1:14540` → MAVSDK로 전송됨 (PX4 못 받음) → **포트는 14580 사용**
-- REAL 모드에서는 PX4가 시리얼에 있으므로 localhost UDP 불가 → 자동 비활성화됨
-- REAL 모드 vision 주입 필요 시: FC에 Ethernet/WiFi UDP MAVLink 포트 설정 후 CFG 수정
+### 6. MAVSDK mocap — 연결 주소 확인
+- SITL: `udpin://0.0.0.0:14540` — MAVSDK가 14540 점유, mocap도 같은 연결 재사용
+- REAL: `serial:///dev/ttyACM0:57600` — FC 시리얼 연결, mocap도 동일 시리얼로 전송
+- `CFG["real_address"]`와 `CFG["uwb_port"]` 가 같은 포트(`/dev/ttyACM0`)를 쓰지 않도록 주의  
+  (MAVSDK용 FC 시리얼 ≠ DWM3001C UWB 시리얼, 물리적으로 다른 포트여야 함)
 
 ### 7. 창 종료 시 미션 스레드 타이밍
 - `drone.connect()` 대기 중에 창을 닫으면 스레드가 즉시 종료되지 않을 수 있음
@@ -332,7 +320,7 @@ self.root.after(0, lambda: self.label.config(text="..."))
 ## TODO (앞으로의 방향)
 
 ### 즉시 필요
-- [ ] VisionPositionInjector REAL 모드 실기체 검증 (QGC로 EKF2 status 모니터링)
+- [ ] REAL 모드 mocap vision 주입 실기체 검증 (QGC → EKF2 status → innovation 정상 여부)
 - [ ] 실기체 DWM3001C hex anchor ID → `anchor_ned_map` 매핑 (현재 str ID 임시 처리)
 - [ ] PX4 EKF2 파라미터 `.params` 파일로 저장 (매 실행마다 설정 불필요)
 
