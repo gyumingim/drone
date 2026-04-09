@@ -67,6 +67,19 @@ except ImportError:
         @staticmethod
         def pixel_to_ned_offset(*a, **kw): return 0., 0.
 
+try:
+    from uwb_localizer import UWBLocalizer
+    HAS_UWB = True
+except ImportError:
+    HAS_UWB = False
+    class UWBLocalizer:            # UWB 모듈 없을 때 더미
+        def __init__(self, **kw): pass
+        def start(self): pass
+        def stop(self): pass
+        def get_position(self): return None
+        def get_distances(self): return {}
+        def set_sitl_drone_pos(self, n, e, z): pass
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  전역 설정
@@ -94,6 +107,11 @@ CFG = {
     "camera_fov"      : 90.0,     # 수평 FOV (degrees)
     "cam_align_tol"   : 0.15,     # 앵커 중심 정렬 허용 오차 (m)
     "cam_align_wait"  : 0.3,      # 정렬 확인 대기 (s)
+    # UWB 설정
+    "uwb_port"        : "/dev/ttyACM0",  # 실기체: DWM3001C 시리얼 포트
+    "uwb_baud"        : 115200,
+    "uwb_mode"        : "text",   # "text" | "tlv"
+    "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
 }
 
 MAP_N           = (-2.0, 20.0)
@@ -479,6 +497,29 @@ class UWBApp:
             self._log(f"  ℹ 카메라 없음 ({CFG['camera_source']})")
         self.root.after(200, self._cam_refresh)   # UI 준비 후 시작
 
+        # UWB 로컬라이저 초기화
+        # SITL: 기존 앵커를 시뮬 앵커로 사용 (거리 노이즈 시뮬레이션)
+        # REAL: DWM3001C 시리얼 읽기 + anchor_ned_map으로 NED 매핑
+        sitl_anchors = [(a["n"], a["e"], 0.0) for a in EXISTING_ANCHORS]
+        # 실기체용 NED 매핑 (DWM3001C 앵커 hex ID → NED 좌표)
+        # 실제 앵커 ID는 DWM3001C가 보고하는 4자리 hex 값으로 교체 필요
+        anchor_ned_map = {str(a["id"]): (a["n"], a["e"], 0.0)
+                          for a in EXISTING_ANCHORS}
+        use_sitl_uwb = (MODE == "SITL") and CFG.get("uwb_sitl", True)
+        self.uwb = UWBLocalizer(
+            port=CFG["uwb_port"],
+            baud=CFG["uwb_baud"],
+            mode=CFG["uwb_mode"],
+            sitl=use_sitl_uwb,
+            sitl_anchors=sitl_anchors,
+            anchor_ned_map=anchor_ned_map,
+        )
+        self.uwb.start()
+        if HAS_UWB:
+            src = "SITL 시뮬" if use_sitl_uwb else CFG["uwb_port"]
+            self._log(f"  📡 UWB 로컬라이저 시작 ({src})")
+        self.root.after(500, self._uwb_refresh)
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -596,7 +637,11 @@ class UWBApp:
         self.rover_pos_lbl = tk.Label(p, text="🚗  로버: 대기 (디포)",
                                        bg=C["panel"], fg=C["rover"],
                                        font=("Courier", 9), justify=tk.LEFT)
-        self.rover_pos_lbl.pack(anchor="w", padx=12, pady=(0, 2))
+        self.rover_pos_lbl.pack(anchor="w", padx=12, pady=(0, 1))
+        self.uwb_pos_lbl = tk.Label(p, text="📡 UWB: 대기",
+                                     bg=C["panel"], fg=C["dim"],
+                                     font=("Courier", 9), justify=tk.LEFT)
+        self.uwb_pos_lbl.pack(anchor="w", padx=12, pady=(0, 2))
         self._sep(p)
 
         def _slider(label, var, lo, hi, res, fg, cmd):
@@ -994,6 +1039,10 @@ class UWBApp:
         self.drone_trail.append((n, e))
         if len(self.drone_trail) > self.TRAIL_MAX:
             self.drone_trail.pop(0)
+        # 더미 시뮬(MAVSDK 없음) + SITL UWB: 애니메이션 위치로 거리 시뮬 갱신
+        # alt 는 양수(위 방향), NED에서 위 = 음수이므로 -alt 변환
+        if MODE == "SITL":
+            self.uwb.set_sitl_drone_pos(n, e, -alt)
         self.drone_pos_lbl.config(
             text=f"🚁  N:{n:+.1f}  E:{e:+.1f}  Alt:{alt:.1f}m")
         self._draw_map()
@@ -1362,6 +1411,9 @@ class UWBApp:
         time.sleep(0.35)
         GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
         self.root.after(0, lambda nm=anchor["name"]: self._mark_installed(nm))
+        # UWB SITL: 신규 앵커 동적 등록 (투하 위치 오차 포함)
+        if MODE == "SITL":
+            self.uwb.add_sitl_anchor(dest_n, dest_e, 0.)
         for i in range(11):
             if self._stop_evt.is_set():
                 return dest_n, dest_e
@@ -1400,7 +1452,24 @@ class UWBApp:
     # ── REAL 모드 비행 헬퍼 ──────────────────────────────────────────────────
 
     async def _wait_reach(self, drone, n, e, tol=0.5, timeout=20.0):
-        """목표 NED 좌표에 tol 미터 이내로 도달할 때까지 대기. timeout 초 초과 시 경고."""
+        """
+        목표 NED 좌표에 tol 미터 이내로 도달할 때까지 대기.
+        REAL 모드(GPS 없음): UWB 위치 기반.
+        SITL 모드: PX4 텔레메트리 기반.
+        """
+        if MODE == "REAL" and HAS_UWB:
+            # GPS 없는 실기체 — UWB 위치로 도달 확인
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < timeout:
+                pos = self.uwb.get_position()
+                if pos:
+                    dist = math.hypot(pos[0] - n, pos[1] - e)
+                    if dist < tol:
+                        return
+                await asyncio.sleep(0.1)
+            self._log(f"  ⚠ UWB 이동 타임아웃 ({timeout:.0f}s) — 계속 진행")
+            return
+        # SITL / GPS 사용: PX4 텔레메트리
         t0 = asyncio.get_running_loop().time()
         async for pv in drone.telemetry.position_velocity_ned():
             dist = math.hypot(pv.position.north_m - n, pv.position.east_m - e)
@@ -1481,6 +1550,8 @@ class UWBApp:
             await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
         await asyncio.sleep(CFG["drop_wait"])
         GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
+        # UWB: 신규 앵커 동적 등록 (SITL/REAL 공통)
+        self.uwb.add_sitl_anchor(dest_n, dest_e, 0.)
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await asyncio.sleep(3.0)
@@ -1602,10 +1673,17 @@ class UWBApp:
 
     async def _telemetry_task(self, drone):
         try:
-            async for pos in drone.telemetry.position_velocity_ned():
-                n   = pos.position.north_m
-                e   = pos.position.east_m
-                alt = -pos.position.down_m
+            async for pv in drone.telemetry.position_velocity_ned():
+                n   = pv.position.north_m
+                e   = pv.position.east_m
+                alt = -pv.position.down_m   # 양수 = 위
+                vn  = pv.velocity.north_m_s
+                ve  = pv.velocity.east_m_s
+                vz  = -pv.velocity.down_m_s  # NED down → 위 양수
+                # SITL: Gazebo 텔레메트리 → UWB 거리 시뮬 + 속도 보조
+                if MODE == "SITL":
+                    self.uwb.set_sitl_drone_pos(n, e, -alt)  # NED: 위=-
+                    self.uwb.set_drone_velocity(vn, ve, -vz)  # NED down
                 self.root.after(0, lambda nn=n, ee=e, aa=alt:
                                 self._update_drone_pos(nn, ee, aa))
         except asyncio.CancelledError:
@@ -1702,10 +1780,27 @@ class UWBApp:
                     text="탐색중", fg=C["rover"])
         self.root.after(66, self._cam_refresh)
 
+    def _uwb_refresh(self):
+        """500ms마다 UWB 위치 표시 갱신."""
+        pos   = self.uwb.get_position()
+        dists = self.uwb.get_distances()
+        if pos:
+            self.uwb_pos_lbl.config(
+                text=f"📡 UWB: N:{pos[0]:.2f} E:{pos[1]:.2f} Z:{pos[2]:.2f}",
+                fg="#a0d8ff")
+        elif dists:
+            self.uwb_pos_lbl.config(
+                text=f"📡 UWB: 측정중 ({len(dists)}앵커)",
+                fg=C["rover"])
+        else:
+            self.uwb_pos_lbl.config(text="📡 UWB: 대기", fg=C["dim"])
+        self.root.after(500, self._uwb_refresh)
+
     def _on_close(self):
         self._stop_evt.set()
         self.gz_monitor.stop()
         self.camera.stop()
+        self.uwb.stop()
         self.root.destroy()
 
     def _log(self, msg: str, tag: str = "info"):
