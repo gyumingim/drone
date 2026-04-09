@@ -231,6 +231,61 @@ camera_detector.py
 
 ---
 
+## 참고 GitHub / 웹 리소스
+
+| 레포 / 링크 | 참고 내용 |
+|-------------|-----------|
+| [TIERS/offboard-control](https://github.com/TIERS/offboard-control) | PX4 UWB+VIO GPS-denied offboard 제어 레퍼런스. heartbeat 전송 패턴 참고 |
+| [Mertcagliyan/UWB-Drone-Positioning](https://github.com/Mertcagliyan/UWB-Drone-Positioning) | Python UWB 삼변측량 → NMEA GPS 에뮬레이션 방식 참고 |
+| [mattiapettene/PX4-mini-drone](https://github.com/mattiapettene/PX4-mini-drone) | ROS2 + UWB + 모션캡처 조합 offboard 구현 |
+| [PX4 issue #19859](https://github.com/PX4/PX4-Autopilot/issues/19859) | EKF2 vision 입력 미작동 — timestamp 문제 원인 분석 |
+| [PX4 issue #17969](https://github.com/PX4/PX4-Autopilot/issues/17969) | EKF2_AID_MASK → EKF2_EV_CTRL 전환 (v1.14+) |
+| [PX4 External Position Estimation 문서](https://docs.px4.io/main/en/ros/external_position_estimation.html) | VISION_POSITION_ESTIMATE 메시지 규격 및 파라미터 |
+
+---
+
+## 수정 이력 (Changelog)
+
+### 2026-04-09 — SITL→REAL 전환 안정화
+
+**🔴 Critical 버그 수정**
+
+1. **VisionPositionInjector 타임스탬프 버그 수정**
+   - 기존: `time.time() * 1e6` (UNIX 에포크 기반 → PX4 boot time 대비 1.7×10¹² 차이)
+   - 수정: PX4 HEARTBEAT의 `time_boot_ms` 수신해 동기화 → PX4 boot 기준 µs 사용
+   - 원인: EKF2가 미래 타임스탬프로 판단해 모든 vision 측정 거부
+
+2. **VisionPositionInjector 하트비트 추가**
+   - 기존: VISION_POSITION_ESTIMATE 만 전송
+   - 수정: 1Hz MAVLink heartbeat 추가 (MAV_TYPE_ONBOARD_CONTROLLER)
+   - 원인: MAVLink 스펙상 하트비트 없으면 PX4가 소스를 신뢰하지 않을 수 있음
+
+**🟡 Important 수정**
+
+3. **EKF2 파라미터 PX4 v1.14+ 호환성**
+   - 기존: `EKF2_AID_MASK=8` (PX4 v1.13 이하 구API)
+   - 수정: `EKF2_EV_CTRL=3, EKF2_GPS_CTRL=0, EKF2_HGT_REF=3` (v1.14+ 신API) + fallback
+   - 원인: v1.14에서 EKF2_AID_MASK deprecated, EV_CTRL로 분리됨
+
+4. **EKF2_HGT_REF=3 추가** (EV 고도 기준)
+   - GPS 없는 환경에서 EKF Z 안정화. 기압계만으로는 실내에서 드리프트.
+
+5. **UWB 위치 신선도(staleness) 체크**
+   - 기존: UWB 끊겨도 마지막 위치 값을 계속 반환
+   - 수정: `get_position(max_age=2.0)` — 2초 이상 갱신 없으면 None 반환
+   - 원인: `_wait_reach`에서 stale 위치로 목표 도달 오판 가능
+
+6. **Vision reset_counter**
+   - 1m 이상 위치 점프 감지 시 reset_counter 증가 → EKF2에게 리셋 요청
+
+**🟢 Minor 수정**
+
+7. **TLV 시리얼 버퍼 처리 개선**
+   - 기존: 256바이트 고정 청크 읽기 → 프레임 경계 불일치 시 파싱 실패
+   - 수정: 1바이트 누적 + 512바이트 초과 시 오래된 데이터 폐기
+
+---
+
 ## 알려진 함정 (Pitfalls)
 
 ### 1. tkinter 스레드 안전성 — **가장 중요**
@@ -263,10 +318,21 @@ self.root.after(0, lambda: self.label.config(text="..."))
 
 ---
 
-## TODO
+## TODO (앞으로의 방향)
 
+### 즉시 필요
+- [ ] VisionPositionInjector REAL 모드 실기체 검증 (QGC로 EKF2 status 모니터링)
+- [ ] 실기체 DWM3001C hex anchor ID → `anchor_ned_map` 매핑 (현재 str ID 임시 처리)
+- [ ] PX4 EKF2 파라미터 `.params` 파일로 저장 (매 실행마다 설정 불필요)
+
+### 미션 완성도
 - [ ] 경로 여러 개 지원 (현재 단일 경로만)
 - [ ] 실기체 gripper 피드백 확인 로직
-- [ ] ROS 2 토픽으로 로버 실제 위치 수신 연동
 - [ ] Gazebo spawn 실패 시 재시도 또는 UI 경고
 - [ ] `reloc_new_positions` 부동소수점 집합 비교 → epsilon 비교로 개선
+
+### 장기
+- [ ] ROS 2 토픽으로 로버 실제 위치 수신 연동
+- [ ] 앵커 자기보정 (잔차 히스토리 기반 위치 추정 개선)
+- [ ] ArUco 마커 기반 앵커 인식 (현재 HSV 색상 기반 → 더 견고하게)
+- [ ] TDOA 모드 지원 (현재 TWR 전용)

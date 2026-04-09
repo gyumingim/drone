@@ -203,21 +203,40 @@ class VisionPositionInjector:
     PX4 EKF2에 주입. GPS 없는 환경에서 offboard position 제어 가능.
 
     사전 조건 (PX4 파라미터):
-      EKF2_AID_MASK |= 8  (vision position 활성화)
+      EKF2_AID_MASK |= 8  또는  EKF2_EV_CTRL |= 3  (vision position 활성화)
       EKF2_EV_DELAY  = 25 (ms, 시각 지연 보정)
 
     포트:
-      SITL : udpin://0.0.0.0:14550 (QGC 포트 재사용)
-      REAL : 컴패니언 보드에서 직렬 또는 UDP로 FC에 전송
+      SITL : PX4 MAVLink UDP 포트 (기본 14540)
+      REAL : 컴패니언 보드에서 FC로 전송하는 포트
+
+    타임스탬프 동기화:
+      PX4 EKF2는 µs-since-boot 기준 타임스탬프를 기대함.
+      UNIX time(1.7e18 µs)을 그대로 쓰면 EKF2가 전부 미래 타임스탬프로
+      간주해 거부함.
+      → 수신 스레드에서 PX4 HEARTBEAT의 time_boot_ms 를 읽어 동기화.
+
+    하트비트:
+      MAVLink 스펙상 모든 노드는 1Hz 하트비트를 보내야 함.
+      없으면 PX4가 해당 소스를 신뢰하지 않을 수 있음.
     """
 
-    def __init__(self, uwb, port: int = 14550, rate_hz: float = 30):
-        self._uwb      = uwb
-        self._port     = port
-        self._period   = 1.0 / max(rate_hz, 1)
-        self._running  = False
-        self._mav      = None
-        self.ok        = False
+    def __init__(self, uwb, port: int = 14540, rate_hz: float = 30):
+        self._uwb         = uwb
+        self._port        = port
+        self._period      = 1.0 / max(rate_hz, 1)
+        self._running     = False
+        self._mav         = None
+        self.ok           = False
+
+        # PX4 boot time 동기화 (HEARTBEAT 수신으로 갱신)
+        self._px4_boot_us  = None   # PX4 time_boot_ms → µs
+        self._t_sync       = None   # 동기 시각 (monotonic)
+        self._sync_lock    = threading.Lock()
+
+        # reset_counter: EKF2에게 위치 점프 발생을 알림
+        self._reset_counter = 0
+        self._prev_pos      = None
 
     def start(self):
         if not HAS_PYMAVLINK:
@@ -225,34 +244,97 @@ class VisionPositionInjector:
                   " (pip install pymavlink)")
             return
         try:
-            # udpout:host:port = pymavlink이 해당 포트로 패킷 전송
-            # PX4 SITL 메인 MAVLink 포트(14540)로 직접 전송
-            # (14550은 QGC용이지만 PX4가 둘 다 수신, 14540이 더 안정적)
+            # udpout: pymavlink이 해당 포트로 패킷 전송
+            # PX4 SITL은 14540(onboard)·14550(GCS) 양쪽에서 수신 가능
             self._mav = _mavutil.mavlink_connection(
                 f"udpout:127.0.0.1:{self._port}",
-                source_system=1,   # PX4 sysid=1과 동일 시스템
-                source_component=195)  # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
+                source_system=1,           # PX4 sysid와 같은 시스템
+                source_component=195)      # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
             self._running = True
             self.ok = True
-            threading.Thread(target=self._loop, daemon=True).start()
+            # 수신 스레드: PX4 HEARTBEAT → time_boot_ms 동기화
+            threading.Thread(target=self._recv_loop, daemon=True).start()
+            # 송신 스레드: VISION_POSITION_ESTIMATE + HEARTBEAT
+            threading.Thread(target=self._send_loop, daemon=True).start()
             print(f"[Vision] VISION_POSITION_ESTIMATE → UDP:{self._port}"
-                  f"  {1/self._period:.0f}Hz")
+                  f"  {1/self._period:.0f}Hz  (boot-time 동기화 대기중)")
         except Exception as e:
             print(f"[Vision] 연결 실패: {e}")
 
     def stop(self):
         self._running = False
 
-    def _loop(self):
+    # ── PX4 boot time 동기화 ────────────────────────────────────────────────
+
+    def _recv_loop(self):
+        """
+        PX4로부터 HEARTBEAT를 수신해 타임스탬프를 동기화.
+        udpout 연결은 첫 send 이후 PX4가 우리 주소를 알게 되어 양방향 통신 가능.
+        """
         while self._running:
-            t0  = time.monotonic()
+            try:
+                msg = self._mav.recv_match(blocking=True, timeout=2.0)
+                if msg is None:
+                    continue
+                mt = msg.get_type()
+                if mt == "HEARTBEAT":
+                    # time_boot_ms: PX4 부팅 후 경과 ms
+                    boot_ms = getattr(msg, "time_boot_ms", None)
+                    if boot_ms is not None:
+                        with self._sync_lock:
+                            self._px4_boot_us = int(boot_ms) * 1000
+                            self._t_sync      = time.monotonic()
+            except Exception:
+                pass
+
+    def _get_timestamp_us(self) -> int:
+        """
+        PX4 boot 기준 µs 타임스탬프 반환.
+        동기화 전에는 monotonic 기반 임시값 사용 (EKF2 거부될 수 있지만
+        서비스 시작 후 몇 초 내로 HEARTBEAT 수신되면 자동 전환).
+        """
+        with self._sync_lock:
+            if self._px4_boot_us is not None:
+                elapsed = time.monotonic() - self._t_sync
+                return self._px4_boot_us + int(elapsed * 1e6)
+        # 동기화 전: monotonic 기반 (PX4 부팅 직후와 비슷한 스케일)
+        return int(time.monotonic() * 1e6)
+
+    # ── 위치 점프 감지 ──────────────────────────────────────────────────────
+
+    def _check_reset(self, pos):
+        """1m 이상 위치 점프 시 reset_counter 증가 → EKF2 재초기화 요청."""
+        if self._prev_pos is not None:
+            d = math.sqrt(sum((a-b)**2 for a, b in zip(pos, self._prev_pos)))
+            if d > 1.0:
+                self._reset_counter = (self._reset_counter + 1) % 256
+        self._prev_pos = pos
+
+    # ── 송신 루프 ───────────────────────────────────────────────────────────
+
+    def _send_loop(self):
+        last_hb = 0.0
+        while self._running:
+            t0 = time.monotonic()
+
+            # 1Hz 하트비트 (MAVLink 스펙 필수: 없으면 PX4가 소스 신뢰 안 함)
+            if t0 - last_hb >= 1.0:
+                try:
+                    self._mav.mav.heartbeat_send(
+                        _mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                        _mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                        0, 0, 0)
+                    last_hb = t0
+                except Exception:
+                    pass
+
             pos = self._uwb.get_position()
             if pos:
-                qual           = self._uwb.get_quality()
-                sn, se, sz     = qual["sigma"]
-                usec           = int(time.time() * 1e6)
-                # covariance 21-element upper triangular (row-major)
-                # NED: x=N y=E z=D(양수=아래)
+                self._check_reset(pos)
+                qual       = self._uwb.get_quality()
+                sn, se, sz = qual["sigma"]
+                usec       = self._get_timestamp_us()
+                # covariance 21-element upper triangular (row-major, NED)
                 # 자세(roll/pitch/yaw)는 UWB로 알 수 없음 → σ=1.0rad 보수적
                 cov = [sn**2, 0., 0., 0., 0., 0.,
                              se**2, 0., 0., 0., 0.,
@@ -263,15 +345,16 @@ class VisionPositionInjector:
                 try:
                     self._mav.mav.vision_position_estimate_send(
                         usec,
-                        float(pos[0]),    # x = north
-                        float(pos[1]),    # y = east
-                        float(-pos[2]),   # z = down (NED, 양수=아래)
-                        0., 0., 0.,       # roll pitch yaw (미지)
+                        float(pos[0]),         # x = north
+                        float(pos[1]),         # y = east
+                        float(-pos[2]),        # z = down (NED, 양수=아래)
+                        0., 0., 0.,            # roll pitch yaw (미지)
                         cov,
-                        0                 # reset_counter
+                        self._reset_counter    # 위치 점프 시 EKF2 리셋 요청
                     )
                 except Exception:
                     pass
+
             elapsed = time.monotonic() - t0
             rem = self._period - elapsed
             if rem > 0:
@@ -1742,14 +1825,27 @@ class UWBApp:
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 # GPS 없이 arm 허용
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-                # GPS 완전 비활성화
-                await drone.param.set_param_int("NAV_GNSS_MASK", 0)
-                # EKF2: vision position만 사용 (bit3=8)
-                await drone.param.set_param_int("EKF2_AID_MASK", 8)
                 # vision 수신 지연 보정 (pymavlink UDP 지연)
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 # vision 최소 품질 기준 완화 (covariance 허용 범위)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
+
+                # PX4 v1.14+ 신API: EKF2_AID_MASK → EKF2_EV_CTRL + EKF2_GPS_CTRL
+                # 구버전(v1.13 이하)은 EKF2_AID_MASK 사용
+                # 참고: https://github.com/PX4/PX4-Autopilot/issues/17969
+                try:
+                    # v1.14+: EKF2_EV_CTRL bit0=수평위치 bit1=수직위치
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)
+                    # GPS 융합 완전 비활성화
+                    await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
+                    # 고도 기준: 3=EV(vision), GPS 없는 환경에서 EKF Z 안정화
+                    await drone.param.set_param_int("EKF2_HGT_REF", 3)
+                    self._log("  ✅ PX4 v1.14+ API: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=3")
+                except Exception:
+                    # v1.13 이하 fallback
+                    await drone.param.set_param_int("EKF2_AID_MASK", 8)
+                    await drone.param.set_param_int("NAV_GNSS_MASK", 0)
+                    self._log("  ✅ PX4 v1.13 API: EKF2_AID_MASK=8, NAV_GNSS_MASK=0")
                 self._log("  ✅ 파라미터: GPS off, vision only, ARM_WO_GPS=1")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")

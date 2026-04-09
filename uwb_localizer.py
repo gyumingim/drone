@@ -385,6 +385,7 @@ class UWBLocalizer:
 
         self._lock        = threading.Lock()
         self._pos         = None
+        self._pos_time    = 0.0   # 마지막 위치 갱신 시각 (monotonic)
         self._dists       = {}
         self._raw_anchors = {}
         self._running     = False
@@ -441,8 +442,17 @@ class UWBLocalizer:
 
     # ── 데이터 조회 ───────────────────────────────────────────────
 
-    def get_position(self) -> tuple | None:
+    def get_position(self, max_age: float = 2.0) -> tuple | None:
+        """
+        현재 위치 반환.
+        max_age: 마지막 갱신 후 이 시간(초) 초과 시 stale로 판단해 None 반환.
+        DWM3001C은 ~6Hz이므로 2초면 12에포크 = 충분한 여유.
+        """
         with self._lock:
+            if self._pos is None:
+                return None
+            if (time.monotonic() - self._pos_time) > max_age:
+                return None   # stale: 마지막 갱신이 너무 오래됨
             return self._pos
 
     def get_distances(self) -> dict:
@@ -533,12 +543,18 @@ class UWBLocalizer:
                     if line:
                         self._process_text(line)
                 else:
-                    chunk  = self._ser.read(256)
-                    buf   += chunk
+                    # TLV 모드: 바이트 누적 후 완전한 패킷만 파싱
+                    # 256바이트 고정 청크 대신 1바이트씩 읽어 버퍼 경계 보장
+                    chunk = self._ser.read(1)
+                    if chunk:
+                        buf += chunk
+                    # 버퍼가 너무 커지면 오래된 데이터 폐기 (프레임 동기 손실)
+                    if len(buf) > 512:
+                        buf = buf[-256:]
                     result = parse_tlv_response(buf)
                     if result:
                         self._apply_result(result)
-                        buf = b""
+                        buf = b""  # 완전한 패킷 처리 후 버퍼 초기화
             except Exception as e:
                 if self._running:
                     print(f"[UWB] 시리얼 에러: {e}")
@@ -575,7 +591,8 @@ class UWBLocalizer:
 
         if pos:
             with self._lock:
-                self._pos = pos
+                self._pos      = pos
+                self._pos_time = time.monotonic()
 
         # GDOP
         if pos and HAS_SCIPY:
