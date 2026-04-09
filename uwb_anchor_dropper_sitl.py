@@ -84,11 +84,10 @@ except ImportError:
         def set_baro_altitude(self, a): pass
         def add_sitl_anchor(self, n, e, z=0.): pass
 
-try:
-    from pymavlink import mavutil as _mavutil
-    HAS_PYMAVLINK = True
-except ImportError:
-    HAS_PYMAVLINK = False
+from mavsdk.mocap import (VisionPositionEstimate as _VPE,
+                          PositionBody as _PosBody,
+                          AngleBody as _AngBody,
+                          Covariance as _Cov)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -123,14 +122,8 @@ CFG = {
     "uwb_mode"        : "text",   # "text" | "tlv"
     "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
     # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
-    "vision_inject"   : True,     # True: UWB 위치를 PX4 EKF2에 주입
-    # PX4 SITL 포트 구조 (px4-rc.mavlink 확인):
-    #   mavlink start -u 14580 -o 14540  ← PX4가 14580에 바인드(수신), 14540으로 전송
-    #   MAVSDK udpin://0.0.0.0:14540     ← MAVSDK가 14540에서 수신
-    # 따라서 vision 데이터는 14580(PX4 수신 포트)으로 전송해야 함.
-    # 14540으로 보내면 MAVSDK가 받고 PX4는 못 받음.
-    "vision_port"     : 14580,    # PX4 SITL onboard 수신 포트
-    "vision_rate_hz"  : 30,       # 주입 Hz
+    # MAVSDK mocap API 사용: drone 연결 재사용, REAL/SITL 공통 동작
+    "vision_rate_hz"  : 30,       # 주입 Hz (mocap.set_vision_position_estimate)
 }
 
 MAP_N           = (-2.0, 20.0)
@@ -197,185 +190,6 @@ C = {
     "reloc_src_hl" : "#ff6030",
     "reloc_arrow"  : "#ff8844",
 }
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  VISION_POSITION_ESTIMATE → PX4 EKF2 주입기
-# ════════════════════════════════════════════════════════════════════════════
-class VisionPositionInjector:
-    """
-    UWB EKF 위치를 MAVLink VISION_POSITION_ESTIMATE 메시지로
-    PX4 EKF2에 주입. GPS 없는 환경에서 offboard position 제어 가능.
-
-    사전 조건 (PX4 파라미터):
-      EKF2_AID_MASK |= 8  또는  EKF2_EV_CTRL |= 3  (vision position 활성화)
-      EKF2_EV_DELAY  = 25 (ms, 시각 지연 보정)
-
-    포트:
-      SITL : PX4 MAVLink UDP 포트 (기본 14540)
-      REAL : 컴패니언 보드에서 FC로 전송하는 포트
-
-    타임스탬프 동기화:
-      PX4 EKF2는 µs-since-boot 기준 타임스탬프를 기대함.
-      UNIX time(1.7e18 µs)을 그대로 쓰면 EKF2가 전부 미래 타임스탬프로
-      간주해 거부함.
-      → 수신 스레드에서 SYSTEM_TIME / LOCAL_POSITION_NED 등 time_boot_ms 포함
-        메시지를 읽어 동기화 (HEARTBEAT에는 time_boot_ms 없음).
-
-    하트비트:
-      MAVLink 스펙상 모든 노드는 1Hz 하트비트를 보내야 함.
-      없으면 PX4가 해당 소스를 신뢰하지 않을 수 있음.
-    """
-
-    def __init__(self, uwb, port: int = 14580, rate_hz: float = 30):
-        self._uwb         = uwb
-        self._port        = port
-        self._period      = 1.0 / max(rate_hz, 1)
-        self._running     = False
-        self._mav         = None
-        self.ok           = False
-
-        # PX4 boot time 동기화 (SYSTEM_TIME 등 time_boot_ms 포함 메시지로 갱신)
-        self._px4_boot_us  = None   # PX4 time_boot_ms → µs
-        self._t_sync       = None   # 동기 시각 (monotonic)
-        self._sync_lock    = threading.Lock()
-
-        # reset_counter: EKF2에게 위치 점프 발생을 알림
-        self._reset_counter = 0
-        self._prev_pos      = None
-
-    def start(self):
-        if not HAS_PYMAVLINK:
-            print("[Vision] pymavlink 없음 → EKF2 주입 비활성화"
-                  " (pip install pymavlink)")
-            return
-        if MODE == "REAL":
-            # REAL 모드: PX4는 시리얼(/dev/ttyACM0)에 연결됨.
-            # localhost UDP로는 PX4에 도달 불가.
-            # FC에 UDP MAVLink 포트가 있다면 CFG["vision_host"]와
-            # CFG["vision_port"]를 FC의 IP:PORT로 변경해야 함.
-            # 현재는 SITL 전용. REAL 모드는 비활성화.
-            print("[Vision] REAL 모드: UDP localhost → FC 불가. vision 주입 비활성화.")
-            print("[Vision]  → FC에 UDP 포트 있으면 CFG['vision_host']에 FC IP 설정 필요.")
-            return
-        try:
-            # udpout: pymavlink이 해당 포트로 패킷 전송
-            # PX4 SITL: 14580 = PX4 onboard MAVLink 로컬 수신 포트
-            # (px4-rc.mavlink: mavlink start -u 14580 -o 14540)
-            self._mav = _mavutil.mavlink_connection(
-                f"udpout:127.0.0.1:{self._port}",
-                source_system=1,           # PX4 sysid와 같은 시스템
-                source_component=195)      # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
-            self._running = True
-            self.ok = True
-            # 수신 스레드: PX4 → time_boot_ms 동기화
-            threading.Thread(target=self._recv_loop, daemon=True).start()
-            # 송신 스레드: VISION_POSITION_ESTIMATE + HEARTBEAT
-            threading.Thread(target=self._send_loop, daemon=True).start()
-            print(f"[Vision] VISION_POSITION_ESTIMATE → UDP:{self._port}"
-                  f"  {1/self._period:.0f}Hz  (boot-time 동기화 대기중)")
-        except Exception as e:
-            print(f"[Vision] 연결 실패: {e}")
-
-    def stop(self):
-        self._running = False
-
-    # ── PX4 boot time 동기화 ────────────────────────────────────────────────
-
-    def _recv_loop(self):
-        """
-        PX4로부터 time_boot_ms 포함 메시지(SYSTEM_TIME, ATTITUDE 등)를 수신해
-        타임스탬프를 동기화. udpout 연결은 첫 send 이후 PX4가 우리 주소를
-        알게 되어 양방향 통신 가능.
-        """
-        while self._running:
-            try:
-                msg = self._mav.recv_match(blocking=True, timeout=2.0)
-                if msg is None:
-                    continue
-                # time_boot_ms는 HEARTBEAT에 없음.
-                # SYSTEM_TIME, LOCAL_POSITION_NED, ATTITUDE 등에 포함됨.
-                # 어떤 메시지든 해당 필드가 있으면 동기화에 사용.
-                boot_ms = getattr(msg, "time_boot_ms", None)
-                if boot_ms is not None:
-                    with self._sync_lock:
-                        self._px4_boot_us = int(boot_ms) * 1000
-                        self._t_sync      = time.monotonic()
-            except Exception:
-                pass
-
-    def _get_timestamp_us(self) -> int:
-        """
-        PX4 boot 기준 µs 타임스탬프 반환.
-        동기화 전에는 monotonic 기반 임시값 사용 (EKF2 거부될 수 있지만
-        SYSTEM_TIME 수신 즉시 자동 전환).
-        """
-        with self._sync_lock:
-            if self._px4_boot_us is not None:
-                elapsed = time.monotonic() - self._t_sync
-                return self._px4_boot_us + int(elapsed * 1e6)
-        # 동기화 전: monotonic 기반 (PX4 부팅 직후와 비슷한 스케일)
-        return int(time.monotonic() * 1e6)
-
-    # ── 위치 점프 감지 ──────────────────────────────────────────────────────
-
-    def _check_reset(self, pos):
-        """1m 이상 위치 점프 시 reset_counter 증가 → EKF2 재초기화 요청."""
-        if self._prev_pos is not None:
-            d = math.sqrt(sum((a-b)**2 for a, b in zip(pos, self._prev_pos)))
-            if d > 1.0:
-                self._reset_counter = (self._reset_counter + 1) % 256
-        self._prev_pos = pos
-
-    # ── 송신 루프 ───────────────────────────────────────────────────────────
-
-    def _send_loop(self):
-        last_hb = 0.0
-        while self._running:
-            t0 = time.monotonic()
-
-            # 1Hz 하트비트 (MAVLink 스펙 필수: 없으면 PX4가 소스 신뢰 안 함)
-            if t0 - last_hb >= 1.0:
-                try:
-                    self._mav.mav.heartbeat_send(
-                        _mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
-                        _mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                        0, 0, 0)
-                    last_hb = t0
-                except Exception:
-                    pass
-
-            pos = self._uwb.get_position()
-            if pos:
-                self._check_reset(pos)
-                qual       = self._uwb.get_quality()
-                sn, se, sz = qual["sigma"]
-                usec       = self._get_timestamp_us()
-                # covariance 21-element upper triangular (row-major, NED)
-                # 자세(roll/pitch/yaw)는 UWB로 알 수 없음 → σ=1.0rad 보수적
-                cov = [sn**2, 0., 0., 0., 0., 0.,
-                             se**2, 0., 0., 0., 0.,
-                                   sz**2, 0., 0., 0.,
-                                         1.0, 0., 0.,
-                                              1.0, 0.,
-                                                   1.0]
-                try:
-                    self._mav.mav.vision_position_estimate_send(
-                        usec,
-                        float(pos[0]),         # x = north
-                        float(pos[1]),         # y = east
-                        float(-pos[2]),        # z = down (NED, 양수=아래)
-                        0., 0., 0.,            # roll pitch yaw (미지)
-                        cov,
-                        self._reset_counter    # 위치 점프 시 EKF2 리셋 요청
-                    )
-                except Exception:
-                    pass
-
-            elapsed = time.monotonic() - t0
-            rem = self._period - elapsed
-            if rem > 0:
-                time.sleep(rem)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -718,19 +532,10 @@ class UWBApp:
             self._log(f"  📡 UWB 로컬라이저 시작 ({src})")
         self.root.after(500, self._uwb_refresh)
 
-        # VISION_POSITION_ESTIMATE 주입기
-        self.vision = VisionPositionInjector(
-            uwb     = self.uwb,
-            port    = CFG["vision_port"],
-            rate_hz = CFG["vision_rate_hz"],
-        )
-        if CFG["vision_inject"]:
-            self.vision.start()
-            if self.vision.ok:
-                self._log(f"  🔭 Vision 주입: UDP:{CFG['vision_port']}"
-                          f"  {CFG['vision_rate_hz']}Hz")
-            else:
-                self._log("  ⚠ Vision 주입 비활성 (pymavlink 없음)")
+        # Vision 주입은 미션 시작 시 _vision_inject_task 로 실행됨
+        # (MAVSDK mocap API → drone 연결 재사용, REAL/SITL 공통)
+        self._log(f"  🔭 Vision 주입: MAVSDK mocap  {CFG['vision_rate_hz']}Hz"
+                  f"  (미션 시작 시 활성화)")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1826,8 +1631,46 @@ class UWBApp:
             self._verify_anchor_coverage(n_before))
         await asyncio.sleep(3.0)
 
+    async def _vision_inject_task(self, drone):
+        """
+        UWB 위치를 MAVSDK mocap API로 PX4 EKF2에 주입.
+        SITL(UDP) / REAL(serial) 모두 동일한 drone 연결 재사용.
+        """
+        NAN    = float('nan')
+        period = 1.0 / max(CFG["vision_rate_hz"], 1)
+        try:
+            while True:
+                t0  = time.monotonic()
+                pos = self.uwb.get_position()
+                if pos:
+                    n, e, z    = pos
+                    sn, se, sz = self.uwb.get_quality()["sigma"]
+                    # 21-element upper triangular covariance (NED 위치 3×3, 자세 3×3)
+                    # 자세는 UWB로 알 수 없음 → 1.0 rad 보수적
+                    cov = [sn**2, NAN, NAN, NAN, NAN, NAN,
+                                  se**2, NAN, NAN, NAN, NAN,
+                                        sz**2, NAN, NAN, NAN,
+                                              1.0, NAN, NAN,
+                                                   1.0, NAN,
+                                                        1.0]
+                    try:
+                        await drone.mocap.set_vision_position_estimate(
+                            _VPE(
+                                time_usec     = int(time.monotonic() * 1e6),
+                                position_body = _PosBody(float(n), float(e), float(-z)),
+                                angle_body    = _AngBody(0., 0., 0.),
+                                pose_covariance = _Cov(cov),
+                            )
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(max(0., period - (time.monotonic() - t0)))
+        except asyncio.CancelledError:
+            pass
+
     async def _mission_coro(self, steps: list, address: str = None):
-        pos_task = None   # finally 블록에서 NameError 방지
+        pos_task    = None   # finally 블록에서 NameError 방지
+        vision_task = None
         try:
             drone = System()
             await drone.connect(system_address=address or CFG["address"])
@@ -1867,11 +1710,14 @@ class UWBApp:
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
-            # telemetry_task를 먼저 시작해야 set_sitl_drone_pos/set_baro_altitude
-            # 가 즉시 호출되어 VisionPositionInjector에 위치 데이터가 공급됨
-            pos_task = asyncio.create_task(self._telemetry_task(drone))
+            # telemetry + vision 동시 시작
+            # telemetry: PX4 위치 → UWB 시뮬 갱신 + 드론 아이콘 이동
+            # vision   : UWB 위치 → PX4 EKF2 주입 (MAVSDK mocap, REAL/SITL 공통)
+            pos_task    = asyncio.create_task(self._telemetry_task(drone))
+            vision_task = asyncio.create_task(self._vision_inject_task(drone))
+            self._log(f"  🔭 Vision 주입 시작: MAVSDK mocap  {CFG['vision_rate_hz']}Hz")
 
-            # EKF2_AID_MASK 변경 후 vision 메시지가 PX4에 도달 + EKF 수렴 대기
+            # EKF2_EV_CTRL 변경 후 vision 메시지가 PX4에 도달 + EKF 수렴 대기
             self._log("  UWB vision 수렴 대기 (3s)...")
             await asyncio.sleep(3.0)
 
@@ -1974,6 +1820,8 @@ class UWBApp:
         finally:
             if pos_task:
                 pos_task.cancel()
+            if vision_task:
+                vision_task.cancel()
             self.root.after(0, self._clear_drone_pos)
             self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
@@ -2126,7 +1974,6 @@ class UWBApp:
         self.gz_monitor.stop()
         self.camera.stop()
         self.uwb.stop()
-        self.vision.stop()
         self.root.destroy()
 
     def _log(self, msg: str, tag: str = "info"):
