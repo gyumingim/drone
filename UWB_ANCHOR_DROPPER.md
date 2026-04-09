@@ -252,7 +252,8 @@ camera_detector.py
 
 1. **VisionPositionInjector 타임스탬프 버그 수정**
    - 기존: `time.time() * 1e6` (UNIX 에포크 기반 → PX4 boot time 대비 1.7×10¹² 차이)
-   - 수정: PX4 HEARTBEAT의 `time_boot_ms` 수신해 동기화 → PX4 boot 기준 µs 사용
+   - 수정: PX4 `SYSTEM_TIME` / `LOCAL_POSITION_NED` 등 `time_boot_ms` 포함 메시지 수신해 동기화
+   - 주의: MAVLink `HEARTBEAT`에는 `time_boot_ms` 없음 (필드 자체가 정의 안 됨)
    - 원인: EKF2가 미래 타임스탬프로 판단해 모든 vision 측정 거부
 
 2. **VisionPositionInjector 하트비트 추가**

@@ -214,7 +214,8 @@ class VisionPositionInjector:
       PX4 EKF2는 µs-since-boot 기준 타임스탬프를 기대함.
       UNIX time(1.7e18 µs)을 그대로 쓰면 EKF2가 전부 미래 타임스탬프로
       간주해 거부함.
-      → 수신 스레드에서 PX4 HEARTBEAT의 time_boot_ms 를 읽어 동기화.
+      → 수신 스레드에서 SYSTEM_TIME / LOCAL_POSITION_NED 등 time_boot_ms 포함
+        메시지를 읽어 동기화 (HEARTBEAT에는 time_boot_ms 없음).
 
     하트비트:
       MAVLink 스펙상 모든 노드는 1Hz 하트비트를 보내야 함.
@@ -229,7 +230,7 @@ class VisionPositionInjector:
         self._mav         = None
         self.ok           = False
 
-        # PX4 boot time 동기화 (HEARTBEAT 수신으로 갱신)
+        # PX4 boot time 동기화 (SYSTEM_TIME 등 time_boot_ms 포함 메시지로 갱신)
         self._px4_boot_us  = None   # PX4 time_boot_ms → µs
         self._t_sync       = None   # 동기 시각 (monotonic)
         self._sync_lock    = threading.Lock()
@@ -276,14 +277,14 @@ class VisionPositionInjector:
                 msg = self._mav.recv_match(blocking=True, timeout=2.0)
                 if msg is None:
                     continue
-                mt = msg.get_type()
-                if mt == "HEARTBEAT":
-                    # time_boot_ms: PX4 부팅 후 경과 ms
-                    boot_ms = getattr(msg, "time_boot_ms", None)
-                    if boot_ms is not None:
-                        with self._sync_lock:
-                            self._px4_boot_us = int(boot_ms) * 1000
-                            self._t_sync      = time.monotonic()
+                # time_boot_ms는 HEARTBEAT에 없음.
+                # SYSTEM_TIME, LOCAL_POSITION_NED, ATTITUDE 등에 포함됨.
+                # 어떤 메시지든 해당 필드가 있으면 동기화에 사용.
+                boot_ms = getattr(msg, "time_boot_ms", None)
+                if boot_ms is not None:
+                    with self._sync_lock:
+                        self._px4_boot_us = int(boot_ms) * 1000
+                        self._t_sync      = time.monotonic()
             except Exception:
                 pass
 
@@ -291,7 +292,7 @@ class VisionPositionInjector:
         """
         PX4 boot 기준 µs 타임스탬프 반환.
         동기화 전에는 monotonic 기반 임시값 사용 (EKF2 거부될 수 있지만
-        서비스 시작 후 몇 초 내로 HEARTBEAT 수신되면 자동 전환).
+        SYSTEM_TIME 수신 즉시 자동 전환).
         """
         with self._sync_lock:
             if self._px4_boot_us is not None:
