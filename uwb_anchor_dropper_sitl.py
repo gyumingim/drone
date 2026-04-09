@@ -124,7 +124,7 @@ CFG = {
     "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
     # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
     "vision_inject"   : True,     # True: UWB 위치를 PX4 EKF2에 주입
-    "vision_port"     : 14550,    # pymavlink UDP 포트 (GCS 포트 재사용)
+    "vision_port"     : 14540,    # PX4 메인 MAVLink 포트 (MAVSDK와 동일)
     "vision_rate_hz"  : 30,       # 주입 Hz
 }
 
@@ -225,8 +225,13 @@ class VisionPositionInjector:
                   " (pip install pymavlink)")
             return
         try:
+            # udpout:host:port = pymavlink이 해당 포트로 패킷 전송
+            # PX4 SITL 메인 MAVLink 포트(14540)로 직접 전송
+            # (14550은 QGC용이지만 PX4가 둘 다 수신, 14540이 더 안정적)
             self._mav = _mavutil.mavlink_connection(
-                f"udpout:127.0.0.1:{self._port}")
+                f"udpout:127.0.0.1:{self._port}",
+                source_system=1,   # PX4 sysid=1과 동일 시스템
+                source_component=195)  # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
             self._running = True
             self.ok = True
             threading.Thread(target=self._loop, daemon=True).start()
@@ -248,12 +253,13 @@ class VisionPositionInjector:
                 usec           = int(time.time() * 1e6)
                 # covariance 21-element upper triangular (row-major)
                 # NED: x=N y=E z=D(양수=아래)
+                # 자세(roll/pitch/yaw)는 UWB로 알 수 없음 → σ=1.0rad 보수적
                 cov = [sn**2, 0., 0., 0., 0., 0.,
                              se**2, 0., 0., 0., 0.,
                                    sz**2, 0., 0., 0.,
-                                         0.1, 0., 0.,
-                                              0.1, 0.,
-                                                   0.1]
+                                         1.0, 0., 0.,
+                                              1.0, 0.,
+                                                   1.0]
                 try:
                     self._mav.mav.vision_position_estimate_send(
                         usec,
@@ -1185,6 +1191,8 @@ class UWBApp:
         # alt 는 양수(위 방향), NED에서 위 = 음수이므로 -alt 변환
         if MODE == "SITL":
             self.uwb.set_sitl_drone_pos(n, e, -alt)
+        # 더미 시뮬에서도 baro 고도 보정 (EKF Z 발산 방지)
+        self.uwb.set_baro_altitude(alt)
         self.drone_pos_lbl.config(
             text=f"🚁  N:{n:+.1f}  E:{e:+.1f}  Alt:{alt:.1f}m")
         self._draw_map()
@@ -1628,6 +1636,7 @@ class UWBApp:
         반환: (정렬된 n, 정렬된 e)
         """
         if not self.camera.ok:
+            self._log("  ⚠ 카메라 없음 — UWB 위치로만 픽업 진행", "warn")
             return cur_n, cur_e
         self._log("  📷 카메라 정렬 시도...")
         t0  = asyncio.get_running_loop().time()
@@ -1745,8 +1754,11 @@ class UWBApp:
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
-            # EKF2_AID_MASK 변경 후 EKF 리셋 대기
-            # vision 메시지가 PX4에 도달해서 EKF가 수렴할 시간
+            # telemetry_task를 먼저 시작해야 set_sitl_drone_pos/set_baro_altitude
+            # 가 즉시 호출되어 VisionPositionInjector에 위치 데이터가 공급됨
+            pos_task = asyncio.create_task(self._telemetry_task(drone))
+
+            # EKF2_AID_MASK 변경 후 vision 메시지가 PX4에 도달 + EKF 수렴 대기
             self._log("  UWB vision 수렴 대기 (3s)...")
             await asyncio.sleep(3.0)
 
@@ -1761,7 +1773,6 @@ class UWBApp:
                               " (VisionPositionInjector 확인 필요)")
                     break
 
-            pos_task = asyncio.create_task(self._telemetry_task(drone))
             await drone.action.arm()
             await drone.offboard.set_position_ned(
                 PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
