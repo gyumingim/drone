@@ -194,28 +194,49 @@ class UWBPositionEKF:
         Q = np.diag([self._qp * dt**2] * 3 + [0.02 * dt] * 3)
         self.P = F @ self.P @ F.T + Q
 
-    def update(self, anchor_pos: np.ndarray, measured_dist: float) -> float:
+    def update(self, anchor_pos: np.ndarray, measured_dist: float,
+               sigma: float = None) -> float:
         """
         단일 거리 측정으로 갱신.
+        sigma: 측정 노이즈 표준편차 (None이면 기본값 사용).
+               DWM3001C QF 기반으로 외부에서 전달 가능.
         반환: 혁신량 (innovation), 이상치 거부 시 None
         """
         if not self._ok():
             return None
+        r         = (sigma ** 2) if sigma is not None else self._r
         dp        = self.x[:3] - anchor_pos
         pred_dist = float(np.linalg.norm(dp))
         if pred_dist < 0.01:
             pred_dist = 0.01
         H     = np.zeros(6)
         H[:3] = dp / pred_dist
-        S     = float(H @ self.P @ H) + self._r
+        S     = float(H @ self.P @ H) + r
         innov = measured_dist - pred_dist
-        # 3σ 이상치 거부
         if abs(innov) > self._outlier_gate * math.sqrt(S):
             return None
         K      = self.P @ H / S
         self.x += K * innov
         self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
         return innov
+
+    def update_altitude(self, z_ned: float, sigma: float = 0.3):
+        """
+        기압계/LiDAR 고도로 Z 상태 직접 보정.
+        z_ned: NED 좌표 (음수 = 위). alt_m(양수 위) 이면 -alt_m 전달.
+        Z 기하학이 나쁜 환경(앵커 전부 같은 높이)에서 Z 발산 방지.
+        """
+        if not self._ok() or not self.initialized:
+            return
+        innov = z_ned - self.x[2]
+        if abs(innov) > 10.0:   # 10m 이상 점프는 노이즈로 거부
+            return
+        H    = np.zeros(6)
+        H[2] = 1.0
+        S    = float(H @ self.P @ H) + sigma ** 2
+        K    = self.P @ H / S
+        self.x += K * innov
+        self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
 
     def update_velocity(self, vel: np.ndarray, sigma_vel: float = 0.1):
         """비행 컨트롤러 속도로 속도 상태 직접 보정."""
@@ -466,11 +487,16 @@ class UWBLocalizer:
         self._sitl_drone = (n, e, z)
 
     def set_drone_velocity(self, vn: float, ve: float, vz: float):
-        """
-        비행 컨트롤러 속도 주입 (NED m/s).
-        EKF predict_with_vel() 에서 사용 → 측정 사이 구간 예측 정확도 향상.
-        """
+        """비행 컨트롤러 속도 주입 (NED m/s). EKF 예측 정확도 향상."""
         self._drone_vel = (vn, ve, vz)
+
+    def set_baro_altitude(self, alt_m: float, sigma: float = 0.3):
+        """
+        기압계/LiDAR 고도 주입 (양수 = 위, 미터).
+        앵커가 전부 같은 높이인 환경에서 EKF Z 발산을 막기 위한 외부 Z 보정.
+        _telemetry_task에서 PX4 고도를 50Hz로 전달하면 Z σ 크게 개선됨.
+        """
+        self._ekf.update_altitude(-alt_m, sigma)  # alt(위+) → NED(아래+)
 
     def add_sitl_anchor(self, n: float, e: float, z: float = 0.,
                         pos_uncertainty: float = 0.15,
@@ -591,8 +617,11 @@ class UWBLocalizer:
             ap = self._get_anchor_ned(aid, info.get("pos"))
             if not ap:
                 continue
+            # QF(0~100) → 측정 노이즈 sigma: QF=100→0.05m, QF=0→0.5m
+            qf    = info.get("qf", 50)
+            sigma = 0.05 + 0.0045 * (100 - max(0, min(100, qf)))
             innov = self._ekf.update(np.array(ap, dtype=float),
-                                     info["dist_m"])
+                                     info["dist_m"], sigma=sigma)
             # 잔차 기록 (앵커 건강 모니터링용)
             if innov is not None:
                 hist = self._anchor_residuals.setdefault(aid, [])

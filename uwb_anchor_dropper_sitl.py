@@ -78,7 +78,17 @@ except ImportError:
         def stop(self): pass
         def get_position(self): return None
         def get_distances(self): return {}
+        def get_quality(self): return {"sigma": (999,999,999)}
         def set_sitl_drone_pos(self, n, e, z): pass
+        def set_drone_velocity(self, n, e, z): pass
+        def set_baro_altitude(self, a): pass
+        def add_sitl_anchor(self, n, e, z=0.): pass
+
+try:
+    from pymavlink import mavutil as _mavutil
+    HAS_PYMAVLINK = True
+except ImportError:
+    HAS_PYMAVLINK = False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -112,6 +122,10 @@ CFG = {
     "uwb_baud"        : 115200,
     "uwb_mode"        : "text",   # "text" | "tlv"
     "uwb_sitl"        : True,     # SITL 모드에서 거리 시뮬레이션 활성화
+    # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
+    "vision_inject"   : True,     # True: UWB 위치를 PX4 EKF2에 주입
+    "vision_port"     : 14550,    # pymavlink UDP 포트 (GCS 포트 재사용)
+    "vision_rate_hz"  : 30,       # 주입 Hz
 }
 
 MAP_N           = (-2.0, 20.0)
@@ -178,6 +192,84 @@ C = {
     "reloc_src_hl" : "#ff6030",
     "reloc_arrow"  : "#ff8844",
 }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  VISION_POSITION_ESTIMATE → PX4 EKF2 주입기
+# ════════════════════════════════════════════════════════════════════════════
+class VisionPositionInjector:
+    """
+    UWB EKF 위치를 MAVLink VISION_POSITION_ESTIMATE 메시지로
+    PX4 EKF2에 주입. GPS 없는 환경에서 offboard position 제어 가능.
+
+    사전 조건 (PX4 파라미터):
+      EKF2_AID_MASK |= 8  (vision position 활성화)
+      EKF2_EV_DELAY  = 25 (ms, 시각 지연 보정)
+
+    포트:
+      SITL : udpin://0.0.0.0:14550 (QGC 포트 재사용)
+      REAL : 컴패니언 보드에서 직렬 또는 UDP로 FC에 전송
+    """
+
+    def __init__(self, uwb, port: int = 14550, rate_hz: float = 30):
+        self._uwb      = uwb
+        self._port     = port
+        self._period   = 1.0 / max(rate_hz, 1)
+        self._running  = False
+        self._mav      = None
+        self.ok        = False
+
+    def start(self):
+        if not HAS_PYMAVLINK:
+            print("[Vision] pymavlink 없음 → EKF2 주입 비활성화"
+                  " (pip install pymavlink)")
+            return
+        try:
+            self._mav = _mavutil.mavlink_connection(
+                f"udpout:127.0.0.1:{self._port}")
+            self._running = True
+            self.ok = True
+            threading.Thread(target=self._loop, daemon=True).start()
+            print(f"[Vision] VISION_POSITION_ESTIMATE → UDP:{self._port}"
+                  f"  {1/self._period:.0f}Hz")
+        except Exception as e:
+            print(f"[Vision] 연결 실패: {e}")
+
+    def stop(self):
+        self._running = False
+
+    def _loop(self):
+        while self._running:
+            t0  = time.monotonic()
+            pos = self._uwb.get_position()
+            if pos:
+                qual           = self._uwb.get_quality()
+                sn, se, sz     = qual["sigma"]
+                usec           = int(time.time() * 1e6)
+                # covariance 21-element upper triangular (row-major)
+                # NED: x=N y=E z=D(양수=아래)
+                cov = [sn**2, 0., 0., 0., 0., 0.,
+                             se**2, 0., 0., 0., 0.,
+                                   sz**2, 0., 0., 0.,
+                                         0.1, 0., 0.,
+                                              0.1, 0.,
+                                                   0.1]
+                try:
+                    self._mav.mav.vision_position_estimate_send(
+                        usec,
+                        float(pos[0]),    # x = north
+                        float(pos[1]),    # y = east
+                        float(-pos[2]),   # z = down (NED, 양수=아래)
+                        0., 0., 0.,       # roll pitch yaw (미지)
+                        cov,
+                        0                 # reset_counter
+                    )
+                except Exception:
+                    pass
+            elapsed = time.monotonic() - t0
+            rem = self._period - elapsed
+            if rem > 0:
+                time.sleep(rem)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -519,6 +611,20 @@ class UWBApp:
             src = "SITL 시뮬" if use_sitl_uwb else CFG["uwb_port"]
             self._log(f"  📡 UWB 로컬라이저 시작 ({src})")
         self.root.after(500, self._uwb_refresh)
+
+        # VISION_POSITION_ESTIMATE 주입기
+        self.vision = VisionPositionInjector(
+            uwb     = self.uwb,
+            port    = CFG["vision_port"],
+            rate_hz = CFG["vision_rate_hz"],
+        )
+        if CFG["vision_inject"]:
+            self.vision.start()
+            if self.vision.ok:
+                self._log(f"  🔭 Vision 주입: UDP:{CFG['vision_port']}"
+                          f"  {CFG['vision_rate_hz']}Hz")
+            else:
+                self._log("  ⚠ Vision 주입 비활성 (pymavlink 없음)")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1022,6 +1128,16 @@ class UWBApp:
                                      fill=C["drone_trail"], outline="")
         cx, cy = m.w2c(dn, de)
         r = 8
+        # UWB EKF 위치 불확실도 타원 (3σ)
+        qual = self.uwb.get_quality()
+        sn, se, _ = qual["sigma"]
+        if sn < 5. and se < 5.:   # 합리적인 범위일 때만 표시
+            rx = int(m.m2px(se * 3))
+            ry = int(m.m2px(sn * 3))
+            if rx > 2 and ry > 2:
+                self.canvas.create_oval(cx-rx, cy-ry, cx+rx, cy+ry,
+                                         outline="#2a4a8a", width=1,
+                                         dash=(4, 3))
         self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
                                  outline=C["drone"], width=2, fill="")
         self.canvas.create_line(cx-r-3, cy, cx+r+3, cy, fill=C["drone"], width=1)
@@ -1535,6 +1651,22 @@ class UWBApp:
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await asyncio.sleep(2.0)
 
+    async def _verify_anchor_coverage(self, expected_count: int,
+                                       timeout: float = 5.0):
+        """
+        앵커 투하 후 UWB 거리 측정 수가 증가했는지 확인.
+        expected_count: 투하 전 앵커 수. 투하 후 +1 이상이면 성공.
+        """
+        t0 = asyncio.get_running_loop().time()
+        while asyncio.get_running_loop().time() - t0 < timeout:
+            n = len(self.uwb.get_distances())
+            if n > expected_count:
+                self._log(f"  ✅ UWB 앵커 수신 확인 ({n}개)")
+                return True
+            await asyncio.sleep(0.3)
+        self._log(f"  ⚠ 신규 앵커 UWB 미수신 ({timeout:.0f}s 내) — 투하 실패 가능")
+        return False
+
     async def _real_fly_drop(self, drone, dest_n, dest_e, anchor):
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
@@ -1549,11 +1681,14 @@ class UWBApp:
             await asyncio.sleep(1.5)
             await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
         await asyncio.sleep(CFG["drop_wait"])
+        n_before = len(self.uwb.get_distances())
         GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
-        # UWB: 신규 앵커 동적 등록 (SITL/REAL 공통)
         self.uwb.add_sitl_anchor(dest_n, dest_e, 0.)
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
+        # 신규 앵커에서 UWB 수신 확인 (비동기, 이륙 중 병렬)
+        asyncio.ensure_future(
+            self._verify_anchor_coverage(n_before))
         await asyncio.sleep(3.0)
 
     async def _mission_coro(self, steps: list, address: str = None):
@@ -1568,9 +1703,16 @@ class UWBApp:
 
             # GCS 연결 없이도 arm 허용 (SITL/오프보드 전용)
             try:
-                await drone.param.set_param_int("NAV_RCL_ACT", 0)    # RC 끊김 액션 없음
-                await drone.param.set_param_int("COM_RCL_EXCEPT", 4) # GCS 예외 허용
-                self._log("  파라미터 설정 완료")
+                await drone.param.set_param_int("NAV_RCL_ACT", 0)
+                await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
+                # GPS-denied: vision position을 EKF2 소스로 활성화
+                # EKF2_AID_MASK: bit3=8 (vision pos), bit0=1 (GPS)
+                # REAL 모드(화성): GPS 완전 비활성 → 8 only
+                # SITL 모드: GPS + vision → 9 (안전하게 둘 다)
+                aid_mask = 9 if MODE == "SITL" else 8
+                await drone.param.set_param_int("EKF2_AID_MASK", aid_mask)
+                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                self._log(f"  EKF2_AID_MASK={aid_mask}  EV_DELAY=25ms 설정")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
@@ -1684,6 +1826,9 @@ class UWBApp:
                 if MODE == "SITL":
                     self.uwb.set_sitl_drone_pos(n, e, -alt)  # NED: 위=-
                     self.uwb.set_drone_velocity(vn, ve, -vz)  # NED down
+                # 기압계 고도로 EKF Z 보정 (SITL/REAL 공통)
+                # 앵커가 평면 배치된 환경에서 Z 발산 방지
+                self.uwb.set_baro_altitude(alt)
                 self.root.after(0, lambda nn=n, ee=e, aa=alt:
                                 self._update_drone_pos(nn, ee, aa))
         except asyncio.CancelledError:
@@ -1801,6 +1946,7 @@ class UWBApp:
         self.gz_monitor.stop()
         self.camera.stop()
         self.uwb.stop()
+        self.vision.stop()
         self.root.destroy()
 
     def _log(self, msg: str, tag: str = "info"):
