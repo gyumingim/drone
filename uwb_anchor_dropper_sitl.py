@@ -121,6 +121,7 @@ CFG = {
     # VISION_POSITION_ESTIMATE → PX4 EKF2 주입 설정
     # MAVSDK mocap API 사용: drone 연결 재사용, REAL/SITL 공통 동작
     "vision_rate_hz"  : 30,       # 주입 Hz (mocap.set_vision_position_estimate)
+    "rover_speed"     : 0.5,      # 로버 이동 속도 (m/s)
 }
 
 MAP_N           = (-2.0, 20.0)
@@ -479,8 +480,12 @@ class UWBApp:
         self.relocated_existing_ids  = set()
         self.reloc_new_positions     = []
         self.mission_steps           = []
-        self._rover_gen              = 0
         self._stop_evt               = threading.Event()
+        # 로버 자율 주행
+        self._rover_drive_active = False
+        self._rover_paused       = False
+        self._rover_pause_evt    = threading.Event()
+        self._rover_pause_evt.set()   # 기본: 주행 중 (clear=정지)
 
         self.spacing_var     = tk.DoubleVar(value=ANCHOR_SPACING)
         self.width_var       = tk.DoubleVar(value=ANCHOR_WIDTH)
@@ -1042,13 +1047,15 @@ class UWBApp:
             return
         rx, ry = m.w2c(rn, re)
         r = 10
+        border = "#ff8844" if self._rover_paused else "white"
         self.canvas.create_rectangle(rx-r, ry-r, rx+r, ry+r,
-                                      fill=C["rover"], outline="white", width=1)
+                                      fill=C["rover"], outline=border, width=2)
         self.canvas.create_text(rx, ry, text="R",
                                  fill=C["bg"], font=("Courier", 9, "bold"))
+        state  = " ⏸" if self._rover_paused else ""
         self.canvas.create_text(rx, ry-r-10,
-                                 text=f"디포 {self.depot_remaining}",
-                                 fill=C["rover"], font=("Courier", 8))
+                                 text=f"디포 {self.depot_remaining}{state}",
+                                 fill=border, font=("Courier", 8, "bold"))
 
     def _draw_drone(self):
         if not self.drone_pos:
@@ -1230,6 +1237,7 @@ class UWBApp:
     def _clear(self):
         # 진행 중인 미션 중단
         self._stop_evt.set()
+        self._stop_rover_drive()
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_confirm.config(state=tk.DISABLED)
 
@@ -1327,43 +1335,50 @@ class UWBApp:
 
         prev_n, prev_e = n_home, e_home
 
+        # 이륙 완료 후 로버 자율 주행 시작
+        self._start_rover_drive()
+
         for idx, step in enumerate(steps):
             if self._stop_evt.is_set():
                 self._log("⏹ [SIM] 미션 중단됨"); break
             atype  = step["type"]
             anchor = step["anchor"]
-            t_n, t_e  = anchor["n"], anchor["e"]
-            rover_t   = step.get("rover_t", 0.0)
+            t_n, t_e = anchor["n"], anchor["e"]
 
             if atype == "skip":
                 self._log(f"\n⚠ [{idx+1}/{N}] {anchor['name']} — {step.get('reason','')}")
-                self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
-                continue
-
-            self._start_rover_move(rover_t)
+                continue   # 로버는 계속 주행
 
             if atype == "from_depot":
-                pick_n, pick_e = step["rover_pos"]
-                self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버({pick_n:.1f},{pick_e:.1f})")
+                # 로버 정지 → 현재 실제 위치에서 픽업
+                self._pause_rover()
+                pick_n, pick_e = (self.rover_pos if self.rover_pos
+                                  else step["rover_pos"])
+                self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버"
+                          f"({pick_n:.1f},{pick_e:.1f})  ⏸ 로버 정지")
                 prev_n, prev_e = self._sim_fly_pick(
                     prev_n, prev_e, pick_n, pick_e,
                     flight_alt, drop_alt, label="로버에서 집기")
                 self.root.after(0, self._depot_consume)
+                self._resume_rover()
+                self._log("  ▶ 로버 재개")
 
             elif atype == "relocate":
+                # 재배치: 로버는 계속 주행
                 src   = step["source"]
                 stype = step["source_type"]
                 src_n, src_e = src["n"], src["e"]
                 src_label = (f"A{src['id']}" if "id" in src
                              else f"신규({src_n:.1f},{src_e:.1f})")
                 self._log(f"\n─ [{idx+1}/{N}] 재배치: {src_label} "
-                           f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
-                self._log(f"    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
+                          f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
+                self._log("    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
 
                 if stype == "existing":
                     def on_grab(sid=src["id"]):
                         self.root.after(0, lambda: self._mark_relocated_existing(sid))
-                        GazeboMonitor.despawn(f"uwb_anchor_{sid}", world=CFG["gz_world"])
+                        GazeboMonitor.despawn(f"uwb_anchor_{sid}",
+                                              world=CFG["gz_world"])
                 else:
                     def on_grab(sn=src_n, se=src_e, nm=src["name"]):
                         self.root.after(0, lambda: self._mark_relocated_new(sn, se))
@@ -1379,6 +1394,8 @@ class UWBApp:
             self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
             prev_n, prev_e = self._sim_fly_drop(
                 prev_n, prev_e, t_n, t_e, flight_alt, drop_alt, anchor)
+
+        self._stop_rover_drive()
 
         if not self._stop_evt.is_set():
             self._log("\n[SIM] 홈 복귀...")
@@ -1406,21 +1423,53 @@ class UWBApp:
                             self._update_drone_pos(n, e, a))
             time.sleep(delay)
 
-    def _start_rover_move(self, target_t: float):
-        self._rover_gen += 1
-        gen = self._rover_gen
-        threading.Thread(target=self._sim_move_rover_to,
-                         args=(target_t, gen), daemon=True).start()
+    # ── 로버 자율 주행 ────────────────────────────────────────────────────────
 
-    def _sim_move_rover_to(self, target_t: float, gen: int = 0,
-                           steps: int = 20, delay: float = 0.09):
-        start_t = self.rover_t
-        for i in range(steps + 1):
-            if self._rover_gen != gen:
+    def _start_rover_drive(self):
+        """경로 시작 → 끝으로 로버를 rover_speed m/s로 구동 시작."""
+        self._rover_drive_active = True
+        self._rover_paused       = False
+        self._rover_pause_evt.set()
+        threading.Thread(target=self._rover_drive_loop, daemon=True).start()
+
+    def _stop_rover_drive(self):
+        self._rover_drive_active = False
+        self._rover_pause_evt.set()   # 대기 중이면 unblock
+
+    def _pause_rover(self):
+        """from_depot 픽업 시 로버 일시정지."""
+        self._rover_paused = True
+        self._rover_pause_evt.clear()
+        self.root.after(0, self._draw_map)
+
+    def _resume_rover(self):
+        """픽업 완료 후 로버 재개."""
+        self._rover_paused = False
+        self._rover_pause_evt.set()
+        self.root.after(0, self._draw_map)
+
+    def _rover_drive_loop(self):
+        """50ms 틱으로 로버 t 값을 rover_speed 기반으로 증가. 정지 이벤트 지원."""
+        n0, e0 = self.path_start
+        n1, e1 = self.path_end
+        path_len = math.hypot(n1 - n0, e1 - e0)
+        if path_len < 0.01:
+            return
+        speed = CFG["rover_speed"]
+        dt    = 0.05
+        t     = self.rover_t
+        while self._rover_drive_active and not self._stop_evt.is_set():
+            # 일시정지 대기 (0.1s 단위로 stop 체크)
+            if not self._rover_pause_evt.wait(timeout=0.1):
+                continue
+            if not self._rover_drive_active or self._stop_evt.is_set():
                 break
-            t = start_t + (i / steps) * (target_t - start_t)
+            if t >= 1.0:
+                self.root.after(0, lambda: self._update_rover_pos(1.0))
+                break
+            t = min(1.0, t + (speed * dt) / path_len)
             self.root.after(0, lambda tt=t: self._update_rover_pos(tt))
-            time.sleep(delay)
+            time.sleep(dt)
 
     def _sim_descend_ascend(self, n, e, flight_alt, drop_alt, on_grab=None):
         for i in range(11):
@@ -1725,7 +1774,7 @@ class UWBApp:
                     self._log("  ✅ 로컬 포지션 OK (UWB vision 수신됨)"); break
                 if asyncio.get_running_loop().time() - t_health > 15.0:
                     self._log("  ⚠ 로컬 포지션 타임아웃 — vision 미수신"
-                              " (VisionPositionInjector 확인 필요)")
+                              " (UWB 연결 및 EKF2_EV_CTRL 확인 필요)")
                     break
 
             await drone.action.arm()
@@ -1733,8 +1782,10 @@ class UWBApp:
                 PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
             await drone.offboard.start()
             self._log("  이륙...")
-            self.root.after(0, lambda: self._update_rover_pos(0.0))
             await asyncio.sleep(CFG["takeoff_wait"])
+
+            # 이륙 완료 후 로버 자율 주행 시작
+            self._start_rover_drive()
 
             N = len(steps)
             for idx, step in enumerate(steps):
@@ -1743,35 +1794,39 @@ class UWBApp:
                 atype   = step["type"]
                 anchor  = step["anchor"]
                 t_n, t_e = anchor["n"], anchor["e"]
-                rover_t  = step.get("rover_t", 0.0)
 
                 if atype == "skip":
                     self._log(f"\n⚠ [{idx+1}/{N}] {anchor['name']} — {step.get('reason','')}")
-                    self.root.after(0, lambda t=rover_t: self._update_rover_pos(t))
-                    continue
-
-                self._start_rover_move(rover_t)
+                    continue   # 로버는 계속 주행
 
                 if atype == "from_depot":
-                    p_n, p_e = step["rover_pos"]
-                    self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버({p_n:.1f},{p_e:.1f})")
+                    # 로버 정지 → 현재 실제 위치에서 픽업
+                    self._pause_rover()
+                    p_n, p_e = (self.rover_pos if self.rover_pos
+                                else step["rover_pos"])
+                    self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버"
+                              f"({p_n:.1f},{p_e:.1f})  ⏸ 로버 정지")
                     await self._real_fly_pick(drone, p_n, p_e)
                     self.root.after(0, self._depot_consume)
+                    self._resume_rover()
+                    self._log("  ▶ 로버 재개")
 
                 elif atype == "relocate":
+                    # 재배치: 로버는 계속 주행
                     src   = step["source"]
                     stype = step["source_type"]
                     src_n, src_e = src["n"], src["e"]
                     src_label = (f"A{src['id']}" if "id" in src
                                  else f"신규({src_n:.1f},{src_e:.1f})")
                     self._log(f"\n─ [{idx+1}/{N}] 재배치: {src_label} "
-                               f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
-                    self._log(f"    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
+                              f"({src_n:.1f},{src_e:.1f}) → ({t_n:.1f},{t_e:.1f})")
+                    self._log("    [이유] 로버 뒤쪽 + 끝점에서 가장 멀리 있는 앵커")
 
                     if stype == "existing":
                         def on_grab(sid=src["id"]):
                             self.root.after(0, lambda: self._mark_relocated_existing(sid))
-                            GazeboMonitor.despawn(f"uwb_anchor_{sid}", world=CFG["gz_world"])
+                            GazeboMonitor.despawn(f"uwb_anchor_{sid}",
+                                                  world=CFG["gz_world"])
                     else:
                         def on_grab(sn=src_n, se=src_e, nm=src["name"]):
                             self.root.after(0, lambda: self._mark_relocated_new(sn, se))
@@ -1784,6 +1839,8 @@ class UWBApp:
                 self.root.after(0, lambda nm=anchor["name"]: self._mark_installing(nm))
                 await self._real_fly_drop(drone, t_n, t_e, anchor)
                 self.root.after(0, lambda nm=anchor["name"]: self._mark_installed(nm))
+
+            self._stop_rover_drive()
 
             if not self._stop_evt.is_set():
                 h_n, h_e = self.drone_home
@@ -1814,6 +1871,7 @@ class UWBApp:
             except Exception:
                 pass
         finally:
+            self._stop_rover_drive()
             if pos_task:
                 pos_task.cancel()
             if vision_task:
