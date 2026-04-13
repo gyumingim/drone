@@ -906,7 +906,8 @@ class UWBApp:
         self._draw_reloc_arrows()
 
         # 8) 기존 앵커 (UWB 건강 상태 색상 반영)
-        anch_health = self.uwb.get_quality().get("anchor_health", {})
+        anch_health = (self.uwb.get_quality().get("anchor_health", {})
+                       if hasattr(self, "uwb") else {})
         for a in EXISTING_ANCHORS:
             cx, cy = m.w2c(a["n"], a["e"])
             r = 9
@@ -1069,7 +1070,7 @@ class UWBApp:
         cx, cy = m.w2c(dn, de)
         r = 8
         # UWB EKF 위치 불확실도 타원 (3σ)
-        qual = self.uwb.get_quality()
+        qual = self.uwb.get_quality() if hasattr(self, "uwb") else {"sigma": (999, 999, 999)}
         sn, se, _ = qual["sigma"]
         if sn < 5. and se < 5.:   # 합리적인 범위일 때만 표시
             rx = int(m.m2px(se * 3))
@@ -1702,7 +1703,7 @@ class UWBApp:
                         await drone.mocap.set_vision_position_estimate(
                             _VPE(
                                 time_usec     = int(time.monotonic() * 1e6),
-                                position_body = _PosBody(float(n), float(e), float(-z)),
+                                position_body = _PosBody(float(n), float(e), float(z)),
                                 angle_body    = _AngBody(0., 0., 0.),
                                 pose_covariance = _Cov(cov),
                             )
