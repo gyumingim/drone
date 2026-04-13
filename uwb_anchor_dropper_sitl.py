@@ -496,7 +496,9 @@ class UWBApp:
         self._build_ui()
         self.gz_monitor = GazeboMonitor(on_update=self._on_gz_update,
                                          world=CFG["gz_world"])
-        self.gz_monitor.start()
+        # mainloop 시작 후에 스레드 구동 (before mainloop에서 root.after 호출 시
+        # "main thread is not in main loop" RuntimeError 방지)
+        self.root.after(100, self.gz_monitor.start)
 
         # 카메라 초기화
         self.camera = AnchorDetector(
