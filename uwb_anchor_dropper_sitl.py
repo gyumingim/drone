@@ -2229,6 +2229,8 @@ class UWBApp:
         self.root.destroy()
 
     def _log(self, msg: str, tag: str = "info"):
+        # 터미널에도 출력 (미션 로그 실시간 확인용)
+        print(msg, flush=True)
         # 메시지 내용으로 태그 자동 결정
         if tag == "info":
             if msg.startswith(("✅", "▶", "완료")):
