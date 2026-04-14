@@ -1693,11 +1693,26 @@ class UWBApp:
     async def _wait_reach(self, drone, n, e, tol=0.5, timeout=20.0):
         """
         목표 NED 좌표에 tol 미터 이내로 도달할 때까지 대기.
-        REAL 모드(GPS 없음): UWB 위치 기반.
-        SITL 모드: PX4 텔레메트리 기반.
+        SITL 모드: PX4 텔레메트리 직접 사용 (ground truth, UWB 노이즈 무관)
+        REAL 모드: UWB 위치 기반 (GPS 없음)
         """
+        if MODE == "SITL":
+            # SITL: PX4 텔레메트리 = ground truth (Gazebo 물리 시뮬 반영)
+            t0 = asyncio.get_running_loop().time()
+            async for pv in drone.telemetry.position_velocity_ned():
+                cur_n = pv.position.north_m
+                cur_e = pv.position.east_m
+                dist  = math.hypot(cur_n - n, cur_e - e)
+                if dist < tol:
+                    return
+                if asyncio.get_running_loop().time() - t0 > timeout:
+                    self._log(f"  ⚠ 이동 타임아웃 ({timeout:.0f}s) "
+                              f"현재N={cur_n:.1f} E={cur_e:.1f} "
+                              f"목표N={n:.1f} E={e:.1f} 거리={dist:.1f}m")
+                    return
+            return
         if HAS_UWB:
-            # SITL/REAL 모두 UWB 위치로 도달 확인 (GPS 불필요)
+            # REAL: UWB 위치로 도달 확인 (GPS 불필요)
             t0 = time.monotonic()
             while time.monotonic() - t0 < timeout:
                 pos = self.uwb.get_position()
@@ -1877,10 +1892,10 @@ class UWBApp:
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 1)    # 수평 위치만 (z는 baro 사용)
                     await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
-                    await drone.param.set_param_int("EKF2_HGT_REF", 3)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3, GPS_CTRL=0, ARM_WO_GPS=1")
+                    await drone.param.set_param_int("EKF2_HGT_REF", 0)    # 고도 = 기압계 (EV z 불신뢰)
+                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=1(수평), GPS_CTRL=0, HGT_REF=0(baro)")
                 except Exception:
                     await drone.param.set_param_int("EKF2_AID_MASK", 8)
                     await drone.param.set_param_int("NAV_GNSS_MASK", 0)
@@ -1931,6 +1946,17 @@ class UWBApp:
             await drone.offboard.start()
             self._log("  이륙...")
             await asyncio.sleep(CFG["takeoff_wait"])
+
+            # 이륙 완료 위치 확인 (좌표계 디버그)
+            try:
+                async for pv in drone.telemetry.position_velocity_ned():
+                    tn = pv.position.north_m
+                    te = pv.position.east_m
+                    ta = -pv.position.down_m
+                    self._log(f"  [DBG] 이륙완료 PX4 NED: N={tn:.2f} E={te:.2f} Alt={ta:.2f}m")
+                    break
+            except Exception:
+                pass
 
             # 이륙 완료 후 로버 자율 주행 시작
             self._start_rover_drive()

@@ -779,10 +779,23 @@ class UWBLocalizer:
                          + nlos_bias
                          + multipath_bias)
 
+                # QF (품질): 실제 노이즈 σ로부터 역산
+                # sigma = 0.05 + 1.45*(1-QF/100)^2 → QF=85: σ≈0.08m (SITL 일반)
+                # 고각 노이즈: QF 감소, NLOS: QF=20
+                if nlos_bias > 0:
+                    qf = 20
+                elif elev_deg > ELEV_HIGH_NOISE:
+                    angle_ratio = ((elev_deg - ELEV_HIGH_NOISE)
+                                   / (ELEV_DEAD_ZONE - ELEV_HIGH_NOISE))
+                    qf = max(40, int(85 - 45 * angle_ratio))
+                else:
+                    qf = 85
+
                 distances[f"SIM{i}"] = {
                     "dist_m": max(noisy, 0.01),
                     "pos"   : (an, ae, az),  # 시스템이 아는 위치 (오차 포함 X)
                     "nlos"  : nlos_bias > 0,
+                    "qf"    : qf,
                 }
 
             if distances:
