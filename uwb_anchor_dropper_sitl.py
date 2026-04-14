@@ -256,15 +256,18 @@ class GazeboMonitor:
         req = (f'sdf: "{sdf_esc}" '
                f'pose {{ position {{ x: {e} y: {n} z: 0.175 }} }} name: "{name}"')
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/create",
                  "--reqtype", "gz.msgs.EntityFactory",
                  "--reptype", "gz.msgs.Boolean",
                  "--timeout", "2000", "--req", req],
                 capture_output=True, timeout=5
             )
-        except Exception:
-            pass
+            if r.returncode != 0:
+                print(f"[GZ] 앵커 스폰 실패: {name}  "
+                      f"{r.stderr.decode(errors='ignore').strip()[:80]}")
+        except Exception as ex:
+            print(f"[GZ] 앵커 스폰 오류: {name}  {ex}")
 
     @staticmethod
     def despawn(name: str, world: str = "default"):
@@ -281,39 +284,74 @@ class GazeboMonitor:
 
     @staticmethod
     def spawn_rover(n: float, e: float, world: str = "default"):
-        """오렌지색 박스 로버 모델을 Gazebo에 스폰."""
+        """오렌지 차체 + 4륜 + 안테나 마스트 로버 모델을 Gazebo에 스폰.
+        모델 원점 = 지면(z=0). 좌표계: Gazebo ENU (x=East y=North).
+        """
+        W = '0.15 0.15 0.15 1'   # 휠 색 (어두운 회색)
+        O = '1.0 0.55 0.0 1'     # 차체 색 (오렌지)
         sdf_xml = (
             '<?xml version="1.0"?><sdf version="1.7">'
             '<model name="rover_model"><static>true</static>'
             '<link name="body">'
-            '<visual name="vis">'
-            '<geometry><box><size>0.6 0.4 0.25</size></box></geometry>'
-            '<material>'
-            '<ambient>1.0 0.55 0.0 1</ambient>'
-            '<diffuse>1.0 0.55 0.0 1</diffuse>'
-            '</material>'
-            '</visual>'
+            # 차체
+            f'<visual name="chassis"><pose>0 0 0.18 0 0 0</pose>'
+            '<geometry><box><size>0.70 0.50 0.20</size></box></geometry>'
+            f'<material><ambient>{O}</ambient><diffuse>{O}</diffuse>'
+            '</material></visual>'
+            # 앞-왼쪽 휠
+            f'<visual name="wfl"><pose>0.25 0.30 0.08 1.5708 0 0</pose>'
+            '<geometry><cylinder><radius>0.08</radius>'
+            '<length>0.06</length></cylinder></geometry>'
+            f'<material><ambient>{W}</ambient><diffuse>{W}</diffuse>'
+            '</material></visual>'
+            # 앞-오른쪽 휠
+            f'<visual name="wfr"><pose>0.25 -0.30 0.08 1.5708 0 0</pose>'
+            '<geometry><cylinder><radius>0.08</radius>'
+            '<length>0.06</length></cylinder></geometry>'
+            f'<material><ambient>{W}</ambient><diffuse>{W}</diffuse>'
+            '</material></visual>'
+            # 뒤-왼쪽 휠
+            f'<visual name="wrl"><pose>-0.25 0.30 0.08 1.5708 0 0</pose>'
+            '<geometry><cylinder><radius>0.08</radius>'
+            '<length>0.06</length></cylinder></geometry>'
+            f'<material><ambient>{W}</ambient><diffuse>{W}</diffuse>'
+            '</material></visual>'
+            # 뒤-오른쪽 휠
+            f'<visual name="wrr"><pose>-0.25 -0.30 0.08 1.5708 0 0</pose>'
+            '<geometry><cylinder><radius>0.08</radius>'
+            '<length>0.06</length></cylinder></geometry>'
+            f'<material><ambient>{W}</ambient><diffuse>{W}</diffuse>'
+            '</material></visual>'
+            # 안테나 마스트
+            '<visual name="mast"><pose>-0.20 0 0.41 0 0 0</pose>'
+            '<geometry><cylinder><radius>0.02</radius>'
+            '<length>0.26</length></cylinder></geometry>'
+            '<material><ambient>0.85 0.85 0.85 1</ambient>'
+            '<diffuse>0.85 0.85 0.85 1</diffuse></material></visual>'
             '</link></model></sdf>'
         )
         sdf_esc = sdf_xml.replace('"', '\\"')
         req = (f'sdf: "{sdf_esc}" '
-               f'pose {{ position {{ x: {e} y: {n} z: 0.125 }} }} '
+               f'pose {{ position {{ x: {e} y: {n} z: 0.0 }} }} '
                f'name: "rover_model"')
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/create",
                  "--reqtype", "gz.msgs.EntityFactory",
                  "--reptype", "gz.msgs.Boolean",
                  "--timeout", "2000", "--req", req],
                 capture_output=True, timeout=5
             )
-        except Exception:
-            pass
+            if r.returncode != 0:
+                print(f"[GZ] 로버 스폰 실패: "
+                      f"{r.stderr.decode(errors='ignore').strip()[:80]}")
+        except Exception as ex:
+            print(f"[GZ] 로버 스폰 오류: {ex}")
 
     @staticmethod
     def move_rover(n: float, e: float, world: str = "default"):
         """set_pose 서비스로 로버 위치 갱신 (2Hz)."""
-        req = f'name: "rover_model" position {{ x: {e} y: {n} z: 0.125 }}'
+        req = f'name: "rover_model" position {{ x: {e} y: {n} z: 0.0 }}'
         try:
             subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/set_pose",
@@ -536,6 +574,7 @@ class UWBApp:
         self._rover_paused       = False
         self._rover_pause_evt    = threading.Event()
         self._rover_pause_evt.set()   # 기본: 주행 중 (clear=정지)
+        self._rover_pos_time     = 0.0  # 마지막 rover_pos 갱신 시각
 
         self.spacing_var     = tk.DoubleVar(value=ANCHOR_SPACING)
         self.width_var       = tk.DoubleVar(value=ANCHOR_WIDTH)
@@ -1161,10 +1200,11 @@ class UWBApp:
     def _update_rover_pos(self, t: float):
         n0, e0 = self.path_start
         n1, e1 = self.path_end
-        self.rover_t   = min(max(t, 0.0), 1.0)
+        self.rover_t      = min(max(t, 0.0), 1.0)
         rn = n0 + self.rover_t * (n1 - n0)
         re = e0 + self.rover_t * (e1 - e0)
-        self.rover_pos = (rn, re)
+        self.rover_pos      = (rn, re)
+        self._rover_pos_time = time.monotonic()
         self.rover_trail.append((rn, re))
         if len(self.rover_trail) > self.TRAIL_MAX:
             self.rover_trail.pop(0)
@@ -1403,10 +1443,15 @@ class UWBApp:
                 continue   # 로버는 계속 주행
 
             if atype == "from_depot":
-                # 로버 정지 → 현재 실제 위치에서 픽업
+                # 로버 정지 → 현재 실제 위치에서 픽업 (stale 시 계획 위치 fallback)
                 self._pause_rover()
-                pick_n, pick_e = (self.rover_pos if self.rover_pos
-                                  else step["rover_pos"])
+                pos_age = time.monotonic() - self._rover_pos_time
+                if self.rover_pos and pos_age < 1.0:
+                    pick_n, pick_e = self.rover_pos
+                else:
+                    pick_n, pick_e = step["rover_pos"]
+                    if pos_age >= 1.0:
+                        self._log(f"  ⚠ 로버 위치 스테일({pos_age:.1f}s) — 계획 위치 사용")
                 self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버"
                           f"({pick_n:.1f},{pick_e:.1f})  ⏸ 로버 정지")
                 prev_n, prev_e = self._sim_fly_pick(
@@ -1773,7 +1818,7 @@ class UWBApp:
                     try:
                         await drone.mocap.set_vision_position_estimate(
                             _VPE(
-                                time_usec     = int(time.monotonic() * 1e6),
+                                time_usec     = 0,  # 0 → PX4가 수신 시각 사용 (클럭 불일치 방지)
                                 position_body = _PosBody(float(n), float(e), float(z)),
                                 angle_body    = _AngBody(0., 0., 0.),
                                 pose_covariance = _Cov(cov),
@@ -1872,10 +1917,15 @@ class UWBApp:
                     continue   # 로버는 계속 주행
 
                 if atype == "from_depot":
-                    # 로버 정지 → 현재 실제 위치에서 픽업
+                    # 로버 정지 → 현재 실제 위치에서 픽업 (stale 시 계획 위치 fallback)
                     self._pause_rover()
-                    p_n, p_e = (self.rover_pos if self.rover_pos
-                                else step["rover_pos"])
+                    pos_age = time.monotonic() - self._rover_pos_time
+                    if self.rover_pos and pos_age < 1.0:
+                        p_n, p_e = self.rover_pos
+                    else:
+                        p_n, p_e = step["rover_pos"]
+                        if pos_age >= 1.0:
+                            self._log(f"  ⚠ 로버 위치 스테일({pos_age:.1f}s) — 계획 위치 사용")
                     self._log(f"\n─ [{idx+1}/{N}] 디포 픽업 @ 로버"
                               f"({p_n:.1f},{p_e:.1f})  ⏸ 로버 정지")
                     await self._real_fly_pick(drone, p_n, p_e)

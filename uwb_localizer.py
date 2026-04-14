@@ -369,7 +369,11 @@ class UWBLocalizer:
         # 앵커별 잔차 히스토리 {anchor_id: [innov, ...]}
         # — 앵커 건강 모니터링 + 자기보정 기반 데이터
         self._anchor_residuals: dict[str, list] = {}
+        self._anchor_rejections: dict[str, int] = {}  # 3σ gate 거부 횟수
         self._RESIDUAL_HISTORY = 60  # 최근 N회 잔차 보관
+
+        # EKF fuse 타임스탬프 (self._ekf._t 직접 접근 대신 사용)
+        self._last_fuse_t: float | None = None
 
     # ── 시작/종료 ─────────────────────────────────────────────────
 
@@ -430,9 +434,10 @@ class UWBLocalizer:
             # 평균 잔차 > 0.3m = NLOS/오배치 의심
             # std > 0.5m = 불안정한 측정
             health[aid] = {
-                "mean": round(mean, 3),
-                "std" : round(std,  3),
-                "ok"  : abs(mean) < 0.3 and std < 0.5,
+                "mean"      : round(mean, 3),
+                "std"       : round(std,  3),
+                "ok"        : abs(mean) < 0.3 and std < 0.5,
+                "rejections": self._anchor_rejections.get(aid, 0),
             }
         return {
             "gdop"         : self._gdop,
@@ -556,13 +561,13 @@ class UWBLocalizer:
     def _ekf_fuse(self, distances: dict):
         """EKF: predict (속도 보조) → 거리 업데이트 → 잔차 기록."""
         now = time.monotonic()
-        dt  = (now - self._ekf._t) if self._ekf._t else 0.1
-        self._ekf._t = now
+        # _ekf 내부 _t 대신 로컬 타임스탬프 사용 (클래스 경계 의존성 제거)
+        dt  = (now - self._last_fuse_t) if self._last_fuse_t else 0.02
+        self._last_fuse_t = now
 
         vn, ve, vz = self._drone_vel
         spd = math.sqrt(vn**2 + ve**2 + vz**2)
         if spd > 0.05:
-            # 속도 보조 예측
             self._ekf.predict_with_vel(dt, np.array([vn, ve, vz]))
         else:
             self._ekf.predict(dt)
@@ -574,6 +579,9 @@ class UWBLocalizer:
             # QF(0~100) → 측정 노이즈 sigma: QF=100→0.05m, QF=0→0.5m
             qf    = info.get("qf", 50)
             sigma = 0.05 + 0.0045 * (100 - max(0, min(100, qf)))
+            # QF<30: NLOS 판정 → σ 3배 패널티
+            if qf < 30:
+                sigma *= 3.0
             innov = self._ekf.update(np.array(ap, dtype=float),
                                      info["dist_m"], sigma=sigma)
             # 잔차 기록 (앵커 건강 모니터링용)
@@ -582,6 +590,17 @@ class UWBLocalizer:
                 hist.append(innov)
                 if len(hist) > self._RESIDUAL_HISTORY:
                     hist.pop(0)
+            else:
+                # 3σ gate 거부 — 큰 혁신을 히스토리에 기록 (건강 지표 반영)
+                ap_arr  = np.array(ap, dtype=float)
+                pred_d  = float(np.linalg.norm(self._ekf.x[:3] - ap_arr))
+                large   = info["dist_m"] - pred_d
+                hist    = self._anchor_residuals.setdefault(aid, [])
+                hist.append(large)
+                if len(hist) > self._RESIDUAL_HISTORY:
+                    hist.pop(0)
+                self._anchor_rejections[aid] = (
+                    self._anchor_rejections.get(aid, 0) + 1)
 
     def _do_trilaterate(self, distances: dict):
         ad = self._build_anchors_dist(distances)

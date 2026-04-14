@@ -248,7 +248,7 @@ camera_detector.py
 
 ## 수정 이력 (Changelog)
 
-### 2026-04-14 — 로버 자율 주행 + Gazebo 3D 모델
+### 2026-04-14 — 로버 자율 주행 + Gazebo 3D 모델 + 버그픽스 종합
 
 1. **로버 자율 주행 구현** (`_rover_drive_loop`)
    - `rover_speed` m/s(기본 0.5)로 경로 시작→끝 자율 이동 (50ms 틱)
@@ -257,17 +257,38 @@ camera_detector.py
    - 맵에 정지 상태 표시 (⏸ + 오렌지 테두리)
 
 2. **Gazebo 로버 3D 모델** (`GazeboMonitor.spawn_rover / move_rover / despawn_rover`)
-   - 미션 시작 시 오렌지색 박스 모델(`rover_model`) 경로 시작점에 스폰
+   - 미션 시작 시 상세 SDF 모델 스폰: 섀시(박스) + 바퀴 4개(실린더) + 안테나 마스트
    - `_rover_drive_loop` 내 2Hz로 `set_pose` 서비스 호출 → 실시간 위치 갱신
-   - 미션 종료/중단 시 자동 despawn
+   - 미션 종료/중단 시 자동 despawn; z=0.0 스폰(지면 레벨, 비주얼 오프셋으로 보정)
+   - spawn/despawn 실패 시 return code 체크 + 에러 로그
 
 3. **버그픽스: vision z 부호 반전** (`_vision_inject_task`)
    - `float(-z)` → `float(z)`: NED z를 그대로 전달해야 함
    - 기존 코드는 드론을 지하로 보고 → PX4가 급상승 명령
+   - `time_usec=0`: PX4 자체 타임스탬프 사용 → clock mismatch 방지
 
 4. **버그픽스: GazeboMonitor 스레드 타이밍**
    - `gz_monitor.start()` → `root.after(100, gz_monitor.start)`
    - mainloop 전 background thread에서 `root.after()` 호출 시 RuntimeError 방지
+
+5. **버그픽스: `_draw_map` / `_draw_drone` — AttributeError 방지**
+   - `_build_ui()` 중 초기 redraw 시 `self.uwb` 미초기화
+   - `hasattr(self, "uwb")` 가드 추가
+
+6. **EKF dt 계산 개선** (`uwb_localizer.py`)
+   - 기존: `self._ekf._t` (내부 속성 직접 접근, fragile)
+   - 수정: `UWBLocalizer._last_fuse_t` 독자 관리, 기본값 0.02s
+
+7. **NLOS 품질 페널티** (`_ekf_fuse`)
+   - QF < 30 시 측위 sigma × 3.0 → 비가시 앵커 영향 완화
+
+8. **앵커 거절 카운터** (`_ekf_fuse` + `get_quality`)
+   - 3σ 게이트 탈락 시 `_anchor_rejections[aid]++`
+   - `get_quality()` health dict에 `"rejections"` 필드 추가
+
+9. **로버 위치 스테일 감지** (`_run_dummy_mission` + `_mission_coro`)
+   - `_rover_pos_time` 타임스탬프 기록
+   - 픽업 시 1초 초과 스테일이면 계획 위치(`step["rover_pos"]`)로 폴백 + 경고 로그
 
 ---
 
