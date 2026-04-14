@@ -248,6 +248,41 @@ camera_detector.py
 
 ## 수정 이력 (Changelog)
 
+### 2026-04-14 (2) — DetachableJoint 물리 픽업/드롭 안정화
+
+**목표**: 드론이 실제 앵커 모델을 물리적으로 집고 옮기는 것처럼 보이게 (kinematic set_pose 20Hz 대신 Gazebo joint 사용)
+
+#### 구현 방식
+```
+픽업 시퀀스 (SITL)
+  step-0: despawn uwb_payload (이전 잔여물 정리)
+  step-1: spawn_payload(dest_n, dest_e, z=0.175)  ← 그리퍼 바로 아래
+  step-2: despawn 원본 앵커 모델 (anchor_name)
+  step-3: gz topic -t /drone/gripper/attach → DetachableJoint 연결
+  → 이후 subprocess 0개, Gazebo 물리엔진이 payload 위치를 자동 추종
+
+드롭 시퀀스 (SITL)
+  step-1: gz topic -t /drone/gripper/detach → joint 해제, 물리 낙하
+  step-2: 0.8s 대기 (중력 낙하)
+  step-3: gz model -m uwb_payload 위치 조회 → 정적 앵커 스폰 위치 보정
+  step-4: spawn 정적 앵커, add_sitl_anchor
+  (uwb_payload 제거는 다음 픽업 step-0에서)
+```
+
+#### 수정된 버그 3개
+1. **드론 추락**: 이륙 후 `spawn_payload(z=-10)` + `initially_attached` 미지원 → 12m 장력 → 추락  
+   → **비행 중 uwb_payload 없음**: 픽업 시점에만 그리퍼 아래에 스폰
+2. **2회차 픽업 실패 (이름 충돌)**: drop 후 background thread의 despawn이 pick2의 spawn보다 늦게 실행  
+   → **background thread 제거**: step-0 동기 despawn으로 통합
+3. **2회차 페이로드 삭제 (레이스 컨디션)**: drop thread가 pick2의 새 uwb_payload를 삭제  
+   → **drop에서 despawn 호출 완전 제거**
+
+#### 관련 파일
+- `uwb_anchor_dropper_sitl.py` — `spawn_payload`에 위치 파라미터 추가, `_real_fly_pick/drop` 수정
+- `x500_cam/model.sdf` — `gripper_link` + `DetachableJoint` 플러그인 추가
+
+---
+
 ### 2026-04-14 — 로버 자율 주행 + Gazebo 3D 모델 + 버그픽스 종합
 
 1. **로버 자율 주행 구현** (`_rover_drive_loop`)
@@ -360,6 +395,23 @@ self.root.after(0, lambda: self.label.config(text="..."))
 ### 7. 창 종료 시 미션 스레드 타이밍
 - `drone.connect()` 대기 중에 창을 닫으면 스레드가 즉시 종료되지 않을 수 있음
 - `_on_close()` → `_stop_evt.set()` → 다음 `await` 체크 시 종료됨
+
+---
+
+## 예비 문제점 (Known Risks)
+
+> 현재 동작은 하지만 특정 조건에서 실패할 수 있는 항목
+
+| # | 문제 | 조건 | 영향 | 해결 방향 |
+|---|------|------|------|-----------|
+| 1 | **detach_payload 확인 없음** | `gz topic` publish 후 수신 여부 불확실 | payload가 드론에 계속 붙어 있음 | 토픽 3회 재전송 or `get_payload_pose` 로 거리 확인 후 재시도 |
+| 2 | **spawn_payload 실패 무음** | gz service 타임아웃/오류 시 | `attach`가 아무것도 못 붙잡음, `_payload_attached=True` 상태 불일치 | returncode 체크 후 로그, 필요시 재시도 |
+| 3 | **get_payload_pose 파싱 취약** | `gz model` 출력 형식이 버전마다 다를 수 있음 | 낙하 위치 조회 실패 → 목표 좌표 보정 안 됨 | 파싱 실패 시 `dest_n/e` 원본값 사용 (현재도 그렇게 동작) |
+| 4 | **initially_attached 미지원** | gz-sim 버전에 따라 `false` 파라미터 무시 | 픽업 위치에 스폰 즉시 joint 형성 → 작은 오프셋 힘 발생 | 현재 workaround 충분 (spawn 위치가 그리퍼 근처이므로 힘이 작음) |
+| 5 | **마지막 drop 후 uwb_payload 잔류** | 모든 스텝 완료 후 → finally 블록에서 despawn | 미션 오류로 finally 미실행 시 다음 실행에 이름 충돌 | step-0 despawn이 항상 정리하므로 실질적 영향 없음 |
+| 6 | **drop_alt 고도에서 spawn z 불일치** | drop_alt=-0.4m(NED) → 그리퍼 AGL=0.1m, spawn z=0.175m | 0.075m 오프셋으로 joint 형성 → 드론에 미세 하향력 | 실용적으로 무시 가능, 정밀화 시 `spawn z = drop_alt_m - 0.3` |
+| 7 | **cam_align 이후 원본 앵커 위치 vs 정렬 위치** | 카메라 정렬이 앵커를 찾지 못하면 원본 좌표 유지 | 픽업 정확도 저하 | `_cam_align` 이미 fallback 처리 있음 |
+| 8 | **relocate 시 anchor_name 없으면 static 모델 잔류** | `from_depot` 스텝에서 `anchor_name=None` | 픽업 후 빨간 static 앵커 모델이 Gazebo에 남아 있음 | depot pick 위치에는 static 앵커 없으므로 실제 문제 없음 |
 
 ---
 
