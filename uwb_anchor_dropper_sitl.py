@@ -1579,29 +1579,33 @@ class UWBApp:
         self.root.after(0, self._draw_map)
 
     def _rover_drive_loop(self):
-        """50ms 틱으로 로버 t 값을 rover_speed 기반으로 증가. 정지 이벤트 지원."""
+        """50ms 틱으로 로버를 ease-in/out으로 구동. 정지 이벤트 지원."""
         n0, e0 = self.path_start
         n1, e1 = self.path_end
         path_len = math.hypot(n1 - n0, e1 - e0)
         if path_len < 0.01:
             return
-        speed       = CFG["rover_speed"]
-        dt          = 0.05
-        t           = self.rover_t
-        last_gz     = 0.0          # 마지막 Gazebo pose 갱신 시각
-        gz_interval = 0.5          # 2Hz
+        speed        = CFG["rover_speed"]
+        total_time   = path_len / speed   # 등속 기준 총 소요 시간
+        dt           = 0.05               # 20Hz 틱
+        gz_interval  = 0.1               # 10Hz Gazebo 갱신 (0.5→0.1: 순간이동 제거)
+        # tau: 선형 시간 진행 (0→1), t: smoothstep 위치 (ease-in/out)
+        tau     = self.rover_t            # 보통 0에서 시작
+        last_gz = 0.0
         while self._rover_drive_active and not self._stop_evt.is_set():
             # 일시정지 대기 (0.1s 단위로 stop 체크)
             if not self._rover_pause_evt.wait(timeout=0.1):
                 continue
             if not self._rover_drive_active or self._stop_evt.is_set():
                 break
-            if t >= 1.0:
+            if tau >= 1.0:
                 self.root.after(0, lambda: self._update_rover_pos(1.0))
                 break
-            t = min(1.0, t + (speed * dt) / path_len)
+            # smoothstep: 3τ²−2τ³ → 출발·도착 감속, 중간 가속
+            t = tau * tau * (3.0 - 2.0 * tau)
             self.root.after(0, lambda tt=t: self._update_rover_pos(tt))
-            # Gazebo 로버 위치 갱신 (2Hz, subprocess 부담 줄이기)
+            tau = min(1.0, tau + dt / total_time)
+            # Gazebo 위치 갱신 (10Hz)
             now = time.monotonic()
             if now - last_gz >= gz_interval and self.rover_pos:
                 last_gz = now
