@@ -1896,13 +1896,13 @@ class UWBApp:
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)  # SITL 전원 체크 bypass
-                await drone.param.set_param_float("EKF2_EV_DELAY", 0.0)   # SITL 실제 지연 없음 — 25ms시 위치 오프셋 발생
+                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)  # asyncio 지터(±20ms) 흡수 — 0ms 시 Δpos/Δt 속도 노이즈 폭발
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)   # bit0=horiz, bit1=vert (velocity 비트 제거 — ODOMETRY 없이 무의미)
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 1)   # bit0=수평만 — UWB z는 앵커 동일高로 GDOP 불량, 고도는 기압계 사용
                     await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
-                    await drone.param.set_param_int("EKF2_HGT_REF", 3)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3(pos only), GPS_CTRL=0, HGT_REF=3(EV)")
+                    await drone.param.set_param_int("EKF2_HGT_REF", 0)   # 고도 기준 = 기압계 (EV z 신뢰 불가)
+                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=1(수평), GPS_CTRL=0, HGT_REF=0(baro)")
                 except Exception:
                     await drone.param.set_param_int("EKF2_AID_MASK", 8)
                     await drone.param.set_param_int("NAV_GNSS_MASK", 0)
