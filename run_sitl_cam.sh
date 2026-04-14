@@ -18,6 +18,11 @@ echo "Python : $(which python3)"
 echo "protoc : $(protoc --version 2>/dev/null || echo 'not found')"
 echo ""
 
+# 이전 실행 잔여 프로세스 정리 (Ctrl+C 후 재실행 시 SceneBroadcaster 타임아웃 방지)
+echo "🧹 이전 Gazebo/PX4 프로세스 정리..."
+pkill -f gz-sim 2>/dev/null; pkill -f "bin/px4" 2>/dev/null
+sleep 1
+
 # airframe 파일 빌드 디렉토리에 동기화
 if [ -f "$AIRFRAME_SRC" ]; then
     cp "$AIRFRAME_SRC" "$AIRFRAME_DST" 2>/dev/null || true
