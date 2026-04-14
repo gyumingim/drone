@@ -1907,17 +1907,22 @@ class UWBApp:
                 # REAL: vision-only → EKF 수렴 대기 필요
                 self._log("  UWB vision 수렴 대기 (3s)...")
                 await asyncio.sleep(3.0)
+            else:
+                # SITL: 연결 직후 첫 health 메시지가 stale True일 수 있음
+                # GPS/EKF2 완전 초기화 전에 arm 시도 막으려면 최소 대기 필요
+                self._log("  EKF2/GPS 초기화 대기 (3s)...")
+                await asyncio.sleep(3.0)
 
-            # 로컬 포지션 준비 대기 (SITL=GPS 기반으로 즉시, REAL=vision 수렴 후)
+            # 로컬 포지션 준비 대기 (SITL=GPS 기반, REAL=vision 수렴 후)
             self._log("  로컬 포지션 대기...")
             t_health = asyncio.get_running_loop().time()
-            timeout  = 5.0 if MODE == "SITL" else 20.0
+            timeout  = 10.0 if MODE == "SITL" else 20.0
             async for h in drone.telemetry.health():
                 if h.is_local_position_ok:
                     self._log("  ✅ 로컬 포지션 OK"); break
                 if asyncio.get_running_loop().time() - t_health > timeout:
                     self._log(f"  ⚠ 로컬 포지션 타임아웃 ({timeout:.0f}s)"
-                              + (" — UWB 연결/EKF2_EV_CTRL 확인 필요" if MODE == "REAL" else ""))
+                              + (" — UWB/EKF2_EV_CTRL 확인 필요" if MODE == "REAL" else ""))
                     break
 
             await drone.action.arm()
