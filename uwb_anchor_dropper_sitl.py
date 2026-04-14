@@ -379,8 +379,9 @@ class GazeboMonitor:
 
     @staticmethod
     def spawn_payload(world: str = "default",
-                      n: float = 0.0, e: float = 0.0, z: float = 0.175):
-        """물리 UWB 페이로드 모델 스폰. 지정 위치(NED→Gz ENU)에 생성."""
+                      n: float = 0.0, e: float = 0.0,
+                      z: float = 0.175) -> bool:
+        """물리 UWB 페이로드 모델 스폰. 성공 여부 반환."""
         sdf_xml = (
             '<?xml version="1.0"?><sdf version="1.7">'
             '<model name="uwb_payload">'
@@ -413,15 +414,21 @@ class GazeboMonitor:
                f'pose {{ position {{ x: {e:.4f} y: {n:.4f} z: {z:.4f} }} }} '
                f'name: "uwb_payload"')
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["gz", "service", "-s", f"/world/{world}/create",
                  "--reqtype", "gz.msgs.EntityFactory",
                  "--reptype", "gz.msgs.Boolean",
                  "--timeout", "2000", "--req", req],
                 capture_output=True, timeout=5
             )
+            if r.returncode != 0:
+                err = r.stderr.decode(errors="ignore").strip()[:120]
+                print(f"[GZ] 페이로드 스폰 실패 (rc={r.returncode}): {err}")
+                return False
+            return True
         except Exception as ex:
             print(f"[GZ] 페이로드 스폰 오류: {ex}")
+            return False
 
     @staticmethod
     def set_payload_pose(n: float, e: float, z_m: float,
@@ -471,16 +478,22 @@ class GazeboMonitor:
             pass
 
     @staticmethod
-    def detach_payload(world: str = "default"):
-        """DetachableJoint: 그리퍼에서 페이로드 해제 → 물리 낙하."""
+    def detach_payload(world: str = "default") -> bool:
+        """DetachableJoint: 그리퍼에서 페이로드 해제. 성공 여부 반환."""
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["gz", "topic", "-t", "/drone/gripper/detach",
                  "-m", "gz.msgs.Empty", "-p", ""],
                 capture_output=True, timeout=3
             )
-        except Exception:
-            pass
+            if r.returncode != 0:
+                err = r.stderr.decode(errors="ignore").strip()[:80]
+                print(f"[GZ] detach 토픽 전송 실패 (rc={r.returncode}): {err}")
+                return False
+            return True
+        except Exception as ex:
+            print(f"[GZ] detach 오류: {ex}")
+            return False
 
     @staticmethod
     def park_payload(world: str = "default"):
@@ -1891,45 +1904,68 @@ class UWBApp:
 
     async def _real_fly_pick(self, drone, dest_n, dest_e, on_grab=None,
                               anchor_name: str = None):
+        self._log(f"  [PICK] 목표: N={dest_n:.2f} E={dest_e:.2f}")
+        # ── 비행 ──────────────────────────────────────────────────────────
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await self._wait_reach(drone, dest_n, dest_e)
-        # 중간 고도에서 카메라 정렬 (앵커 위 정확히 위치)
+        self._log(f"  [PICK] 목표 상공 도착")
+        # ── 중간 고도 정렬 ─────────────────────────────────────────────────
         mid_alt = CFG["flight_alt"] / 2
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, mid_alt, 0.))
         await asyncio.sleep(1.5)
+        prev_n, prev_e = dest_n, dest_e
         dest_n, dest_e = await self._cam_align(drone, dest_n, dest_e, mid_alt)
-        # 정렬된 위치로 최종 하강
+        if abs(dest_n - prev_n) > 0.05 or abs(dest_e - prev_e) > 0.05:
+            self._log(f"  [PICK] 카메라 정렬: Δ({dest_n-prev_n:+.2f}, "
+                      f"{dest_e-prev_e:+.2f})m")
+        else:
+            self._log(f"  [PICK] 카메라 정렬: 변화 없음 (앵커 감지 실패 or 오차 ≤5cm)")
+        # ── 하강 ──────────────────────────────────────────────────────────
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
         await asyncio.sleep(1.5)
+        self._log(f"  [PICK] 하강 완료 (drop_alt={CFG['drop_alt']}m NED)")
         if on_grab:
             on_grab()
         # ── 물리 픽업 (SITL) ──────────────────────────────────────────────
         if MODE == "SITL":
-            # 0) 혹시 이전 사이클 페이로드 잔여 제거 (이름 충돌 방지)
+            # 0) 이전 사이클 잔여 제거 (이름 충돌 방지)
+            self._log(f"  [PICK/GZ] 0) 기존 uwb_payload 정리...")
             GazeboMonitor.despawn_payload(CFG["gz_world"])
             await asyncio.sleep(0.3)
-            # 1) 픽업 위치에 페이로드 스폰 (그리퍼 바로 아래, ~0.175m 높이)
-            GazeboMonitor.spawn_payload(
+            # 1) 픽업 위치에 페이로드 스폰 (그리퍼 바로 아래)
+            self._log(f"  [PICK/GZ] 1) spawn_payload @ "
+                      f"N={dest_n:.2f} E={dest_e:.2f} z=0.175")
+            ok = GazeboMonitor.spawn_payload(
                 CFG["gz_world"], dest_n, dest_e, 0.175)
-            await asyncio.sleep(0.5)  # 스폰 완료 대기
+            if not ok:
+                self._log("  [PICK/GZ] ⚠ spawn 실패 — attach 건너뜀")
+            await asyncio.sleep(0.5)
             # 2) 원본 앵커 모델 제거
             if anchor_name:
+                self._log(f"  [PICK/GZ] 2) 원본 앵커 제거: {anchor_name}")
                 GazeboMonitor.despawn(anchor_name, CFG["gz_world"])
-            # 3) DetachableJoint 연결 → 이후 subprocess 호출 없이 물리적으로 추종
-            GazeboMonitor.attach_payload(CFG["gz_world"])
-            self._payload_attached = True
+            # 3) DetachableJoint 연결
+            if ok:
+                self._log("  [PICK/GZ] 3) attach_payload 토픽 전송")
+                GazeboMonitor.attach_payload(CFG["gz_world"])
+                self._payload_attached = True
+                self._log("  [PICK/GZ] ✅ payload_attached = True")
+            else:
+                self._log("  [PICK/GZ] ⚠ spawn 실패로 payload_attached = False 유지")
         # ─────────────────────────────────────────────────────────────────
         try:
             await drone.gripper.grab()
         except Exception:
             await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
         await asyncio.sleep(0.5)
+        self._log(f"  [PICK] 상승 복귀 → flight_alt={CFG['flight_alt']}m NED")
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await asyncio.sleep(2.0)
+        self._log(f"  [PICK] 완료")
 
     async def _verify_anchor_coverage(self, expected_count: int,
                                        timeout: float = 5.0):
@@ -1948,26 +1984,55 @@ class UWBApp:
         return False
 
     async def _real_fly_drop(self, drone, dest_n, dest_e, anchor):
+        self._log(f"  [DROP] 목표: N={dest_n:.2f} E={dest_e:.2f}")
+        # ── 비행 ──────────────────────────────────────────────────────────
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
         await self._wait_reach(drone, dest_n, dest_e)
+        self._log(f"  [DROP] 목표 상공 도착")
+        # ── 하강 ──────────────────────────────────────────────────────────
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
         await asyncio.sleep(2.0)
+        self._log(f"  [DROP] 하강 완료 (drop_alt={CFG['drop_alt']}m NED)")
         # ── 물리 드롭 (SITL) ──────────────────────────────────────────────
         if MODE == "SITL" and self._payload_attached:
-            # 1) DetachableJoint 해제 → 페이로드가 관성+중력으로 낙하
-            GazeboMonitor.detach_payload(CFG["gz_world"])
+            self._log("  [DROP/GZ] payload_attached=True → detach 시작")
+            detach_ok = False
+            for attempt in range(3):
+                ok = GazeboMonitor.detach_payload(CFG["gz_world"])
+                self._log(f"  [DROP/GZ] detach 시도 {attempt+1}/3 "
+                          f"(topic rc={'ok' if ok else 'fail'})")
+                await asyncio.sleep(0.8)
+                # 위치로 분리 확인: payload가 드론 위치(dest_n/e)에서
+                # 0.5m 이상 떨어졌거나 z<0.3 (착지)이면 분리 성공
+                pos = GazeboMonitor.get_payload_pose(CFG["gz_world"])
+                if pos is None:
+                    self._log("  [DROP/GZ] payload pose 조회 실패 → 분리 간주")
+                    detach_ok = True
+                    break
+                dist_xy = math.hypot(pos[0] - dest_n, pos[1] - dest_e)
+                self._log(f"  [DROP/GZ] payload pos: N={pos[0]:.2f} "
+                          f"E={pos[1]:.2f} z={pos[2]:.2f}  "
+                          f"dist_xy={dist_xy:.2f}m")
+                if dist_xy > 0.5 or pos[2] < 0.3:
+                    self._log("  [DROP/GZ] ✅ 분리 확인 (위치 이동 or 착지)")
+                    detach_ok = True
+                    break
+                self._log(f"  [DROP/GZ] ⚠ 아직 부착 상태 → 재시도")
+            if not detach_ok:
+                self._log("  [DROP/GZ] ⚠ 3회 시도 후 분리 미확인 (계속 진행)")
             self._payload_attached = False
-            # 2) 물리 낙하 대기 (drop_alt ~0.5m, 중력 낙하 ~0.32s + 여유)
-            await asyncio.sleep(0.8)
-            # 3) 착지 위치 조회 → 정적 앵커 스폰 위치 보정
+            # 최종 착지 위치 → 정적 앵커 스폰 보정
             final = GazeboMonitor.get_payload_pose(CFG["gz_world"])
             if final and abs(final[0] - dest_n) < 1.5:
                 dest_n, dest_e = final[0], final[1]
-                self._log(f"  📍 낙하위치: N={dest_n:.2f} E={dest_e:.2f}")
-            # 4) 페이로드 제거는 다음 픽업 step-0에서 수행 (여기선 하지 않음)
-            # (백그라운드 스레드 제거: 다음 spawn 타이밍 레이스 컨디션 방지)
+                self._log(f"  [DROP/GZ] 착지 보정: N={dest_n:.2f} E={dest_e:.2f}")
+            else:
+                self._log(f"  [DROP/GZ] 착지 위치 조회 실패 → 목표 좌표 사용")
+            # uwb_payload 제거는 다음 픽업 step-0에서 수행 (race-condition 방지)
+        elif MODE == "SITL" and not self._payload_attached:
+            self._log("  [DROP/GZ] payload_attached=False → Gz 드롭 스킵")
         # ─────────────────────────────────────────────────────────────────
         try:
             await drone.gripper.release()
@@ -1977,14 +2042,15 @@ class UWBApp:
             await drone.action.set_actuator(CFG["gripper_actuator"], 0.)
         await asyncio.sleep(CFG["drop_wait"])
         n_before = len(self.uwb.get_distances())
+        self._log(f"  [DROP] 정적 앵커 스폰: {anchor.get('name','?')} "
+                  f"@ N={dest_n:.2f} E={dest_e:.2f}")
         GazeboMonitor.spawn(anchor, world=CFG["gz_world"])
         self.uwb.add_sitl_anchor(dest_n, dest_e, 0.)
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
-        # 신규 앵커에서 UWB 수신 확인 (비동기, 이륙 중 병렬)
-        asyncio.ensure_future(
-            self._verify_anchor_coverage(n_before))
+        asyncio.ensure_future(self._verify_anchor_coverage(n_before))
         await asyncio.sleep(3.0)
+        self._log(f"  [DROP] 완료")
 
     async def _vision_inject_task(self, drone):
         """
