@@ -111,7 +111,7 @@ CFG = {
     "real_address"    : "serial:///dev/ttyACM0:57600",   # REAL: 실제 드론
     "flight_alt"      : -2.5,
     "drop_alt"        : -0.4,
-    "takeoff_wait"    : 5.0,
+    "takeoff_wait"    : 10.0,
     "drop_wait"       : 1.5,
     "gripper_actuator": 1,
     "gz_world"        : "default",
@@ -242,6 +242,152 @@ class GazeboMonitor:
     _attach_pub  = None   # Publisher for /drone/gripper/attach
     _detach_pub  = None   # Publisher for /drone/gripper/detach
 
+    # ── gz-transport: 서비스 요청 노드 (spawn/despawn/set_pose) ──────────────
+    # ref: gazebosim/gz-transport Node.request() Python API
+    _svc_node = None   # Node 레퍼런스 (GC 방지)
+
+    @classmethod
+    def _ensure_svc_node(cls):
+        """gz-transport 서비스 요청 노드 1회 초기화."""
+        if cls._svc_node is not None or _GZ_TRANSPORT_MOD is None:
+            return
+        cls._svc_node = _GZ_TRANSPORT_MOD.Node()
+
+    @staticmethod
+    def _gz_create(sdf_xml: str, name: str,
+                   x: float, y: float, z: float,
+                   world: str = "default") -> bool:
+        """EntityFactory 서비스로 모델 스폰.
+        우선순위:
+          1) gz-transport node.request() — subprocess 없음
+             ref: gazebosim/gz-transport services 문서
+          2) fallback: gz service CLI subprocess
+        """
+        GazeboMonitor._ensure_svc_node()
+        if GazeboMonitor._svc_node is not None and _GZ_MSGS_V is not None:
+            try:
+                _msgs = __import__(
+                    f"gz.msgs{_GZ_MSGS_V}",
+                    fromlist=["entity_factory_pb2", "boolean_pb2"])
+                req = _msgs.entity_factory_pb2.EntityFactory()
+                req.sdf  = sdf_xml
+                req.name = name
+                req.pose.position.x = x
+                req.pose.position.y = y
+                req.pose.position.z = z
+                result, resp = GazeboMonitor._svc_node.request(
+                    f"/world/{world}/create",
+                    req,
+                    _msgs.entity_factory_pb2.EntityFactory,
+                    _msgs.boolean_pb2.Boolean,
+                    2000,
+                )
+                if result and resp.data:
+                    return True
+                print(f"[GZ] create 서비스 실패: {name}")
+                return False
+            except Exception as ex:
+                print(f"[GZ] create 서비스 오류: {ex}")
+        # fallback: CLI subprocess
+        sdf_esc = sdf_xml.replace('"', '\\"')
+        req_str = (f'sdf: "{sdf_esc}" '
+                   f'pose {{ position {{ x: {x:.4f} y: {y:.4f} z: {z:.4f} }} }} '
+                   f'name: "{name}"')
+        try:
+            r = subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/create",
+                 "--reqtype", "gz.msgs.EntityFactory",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "2000", "--req", req_str],
+                capture_output=True, timeout=5)
+            if r.returncode != 0:
+                print(f"[GZ] create CLI 실패: {name} "
+                      f"{r.stderr.decode(errors='ignore').strip()[:80]}")
+                return False
+            return True
+        except Exception as ex:
+            print(f"[GZ] create CLI 오류: {name} {ex}")
+            return False
+
+    @staticmethod
+    def _gz_remove(name: str, world: str = "default") -> bool:
+        """Entity remove 서비스로 모델 제거.
+        우선순위:
+          1) gz-transport node.request()
+          2) fallback: gz service CLI subprocess
+        """
+        GazeboMonitor._ensure_svc_node()
+        if GazeboMonitor._svc_node is not None and _GZ_MSGS_V is not None:
+            try:
+                _msgs = __import__(
+                    f"gz.msgs{_GZ_MSGS_V}",
+                    fromlist=["entity_pb2", "boolean_pb2"])
+                req = _msgs.entity_pb2.Entity()
+                req.name = name
+                req.type = 2   # gz.msgs.Entity.Type.MODEL = 2
+                result, resp = GazeboMonitor._svc_node.request(
+                    f"/world/{world}/remove",
+                    req,
+                    _msgs.entity_pb2.Entity,
+                    _msgs.boolean_pb2.Boolean,
+                    2000,
+                )
+                return bool(result)
+            except Exception as ex:
+                print(f"[GZ] remove 서비스 오류: {name} {ex}")
+        # fallback: CLI subprocess
+        try:
+            subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/remove",
+                 "--reqtype", "gz.msgs.Entity",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "2000", "--req", f'name: "{name}" type: 2'],
+                capture_output=True, timeout=5)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _gz_set_pose(name: str, x: float, y: float, z: float,
+                     world: str = "default"):
+        """set_pose 서비스로 모델 위치 갱신.
+        우선순위:
+          1) gz-transport node.request()
+          2) fallback: gz service CLI subprocess
+        """
+        GazeboMonitor._ensure_svc_node()
+        if GazeboMonitor._svc_node is not None and _GZ_MSGS_V is not None:
+            try:
+                _msgs = __import__(
+                    f"gz.msgs{_GZ_MSGS_V}",
+                    fromlist=["pose_pb2", "boolean_pb2"])
+                req = _msgs.pose_pb2.Pose()
+                req.name = name
+                req.position.x = x
+                req.position.y = y
+                req.position.z = z
+                GazeboMonitor._svc_node.request(
+                    f"/world/{world}/set_pose",
+                    req,
+                    _msgs.pose_pb2.Pose,
+                    _msgs.boolean_pb2.Boolean,
+                    500,
+                )
+                return
+            except Exception:
+                pass
+        # fallback: CLI subprocess
+        try:
+            subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/set_pose",
+                 "--reqtype", "gz.msgs.Pose",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "500",
+                 "--req", f'name: "{name}" position {{ x: {x:.4f} y: {y:.4f} z: {z:.4f} }}'],
+                capture_output=True, timeout=2)
+        except Exception:
+            pass
+
     @classmethod
     def _ensure_pose_sub(cls):
         """gz-transport /dynamic_pose/info 구독 1회 초기화."""
@@ -349,35 +495,14 @@ class GazeboMonitor:
             f'<material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>'
             f'</visual></link></model></sdf>'
         )
-        sdf_esc = sdf_xml.replace('"', '\\"')   # protobuf text 포맷 이스케이프
-        req = (f'sdf: "{sdf_esc}" '
-               f'pose {{ position {{ x: {e} y: {n} z: 0.175 }} }} name: "{name}"')
-        try:
-            r = subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/create",
-                 "--reqtype", "gz.msgs.EntityFactory",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "2000", "--req", req],
-                capture_output=True, timeout=5
-            )
-            if r.returncode != 0:
-                print(f"[GZ] 앵커 스폰 실패: {name}  "
-                      f"{r.stderr.decode(errors='ignore').strip()[:80]}")
-        except Exception as ex:
-            print(f"[GZ] 앵커 스폰 오류: {name}  {ex}")
+        # Gz ENU: x=East, y=North
+        ok = GazeboMonitor._gz_create(sdf_xml, name, e, n, 0.175, world)
+        if not ok:
+            print(f"[GZ] 앵커 스폰 실패: {name}")
 
     @staticmethod
     def despawn(name: str, world: str = "default"):
-        try:
-            subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/remove",
-                 "--reqtype", "gz.msgs.Entity",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "2000", "--req", f'name: "{name}"'],
-                capture_output=True, timeout=5
-            )
-        except Exception:
-            pass
+        GazeboMonitor._gz_remove(name, world)
 
     @staticmethod
     def spawn_rover(n: float, e: float, world: str = "default"):
@@ -427,38 +552,15 @@ class GazeboMonitor:
             '<diffuse>0.85 0.85 0.85 1</diffuse></material></visual>'
             '</link></model></sdf>'
         )
-        sdf_esc = sdf_xml.replace('"', '\\"')
-        req = (f'sdf: "{sdf_esc}" '
-               f'pose {{ position {{ x: {e} y: {n} z: 0.0 }} }} '
-               f'name: "rover_model"')
-        try:
-            r = subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/create",
-                 "--reqtype", "gz.msgs.EntityFactory",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "2000", "--req", req],
-                capture_output=True, timeout=5
-            )
-            if r.returncode != 0:
-                print(f"[GZ] 로버 스폰 실패: "
-                      f"{r.stderr.decode(errors='ignore').strip()[:80]}")
-        except Exception as ex:
-            print(f"[GZ] 로버 스폰 오류: {ex}")
+        # Gz ENU: x=East, y=North
+        ok = GazeboMonitor._gz_create(sdf_xml, "rover_model", e, n, 0.0, world)
+        if not ok:
+            print("[GZ] 로버 스폰 실패")
 
     @staticmethod
     def move_rover(n: float, e: float, world: str = "default"):
-        """set_pose 서비스로 로버 위치 갱신 (2Hz)."""
-        req = f'name: "rover_model" position {{ x: {e} y: {n} z: 0.0 }}'
-        try:
-            subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/set_pose",
-                 "--reqtype", "gz.msgs.Pose",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "500", "--req", req],
-                capture_output=True, timeout=2
-            )
-        except Exception:
-            pass
+        """set_pose 서비스로 로버 위치 갱신 (2Hz). Gz ENU: x=East, y=North."""
+        GazeboMonitor._gz_set_pose("rover_model", e, n, 0.0, world)
 
     @staticmethod
     def despawn_rover(world: str = "default"):
@@ -497,44 +599,17 @@ class GazeboMonitor:
             '</link>'
             '</model></sdf>'
         )
-        sdf_esc = sdf_xml.replace('"', '\\"')
         # Gz ENU: x=East, y=North
-        req = (f'sdf: "{sdf_esc}" '
-               f'pose {{ position {{ x: {e:.4f} y: {n:.4f} z: {z:.4f} }} }} '
-               f'name: "uwb_payload"')
-        try:
-            r = subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/create",
-                 "--reqtype", "gz.msgs.EntityFactory",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "2000", "--req", req],
-                capture_output=True, timeout=5
-            )
-            if r.returncode != 0:
-                err = r.stderr.decode(errors="ignore").strip()[:120]
-                print(f"[GZ] 페이로드 스폰 실패 (rc={r.returncode}): {err}")
-                return False
-            return True
-        except Exception as ex:
-            print(f"[GZ] 페이로드 스폰 오류: {ex}")
-            return False
+        ok = GazeboMonitor._gz_create(sdf_xml, "uwb_payload", e, n, z, world)
+        if not ok:
+            print(f"[GZ] 페이로드 스폰 실패 (n={n:.3f} e={e:.3f} z={z:.3f})")
+        return ok
 
     @staticmethod
     def set_payload_pose(n: float, e: float, z_m: float,
                          world: str = "default"):
         """페이로드 위치 즉시 설정 (Gz ENU: x=East, y=North, z=Up)."""
-        req = (f'name: "uwb_payload" '
-               f'position {{ x: {e:.4f} y: {n:.4f} z: {z_m:.4f} }}')
-        try:
-            subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/set_pose",
-                 "--reqtype", "gz.msgs.Pose",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "500", "--req", req],
-                capture_output=True, timeout=2
-            )
-        except Exception:
-            pass
+        GazeboMonitor._gz_set_pose("uwb_payload", e, n, z_m, world)
 
     @staticmethod
     def get_payload_pose(world: str = "default"):
@@ -2297,11 +2372,17 @@ class UWBApp:
             t_health = asyncio.get_running_loop().time()
             async for h in drone.telemetry.health():
                 elapsed = asyncio.get_running_loop().time() - t_health
-                self._log(f"  [DBG] {elapsed:.1f}s armable={h.is_armable} local={h.is_local_position_ok}")
-                if h.is_armable:
-                    self._log("  ✅ Armable"); break
-                if elapsed > 20.0:
-                    self._log("  ⚠ 타임아웃(20s) → 강제 진행"); break
+                home_ok = getattr(h, "is_home_position_ok", True)  # MAVSDK 버전 호환
+                self._log(
+                    f"  [DBG] {elapsed:.1f}s "
+                    f"armable={h.is_armable} "
+                    f"local={h.is_local_position_ok} "
+                    f"home={home_ok}"
+                )
+                if h.is_armable and h.is_local_position_ok and home_ok:
+                    self._log("  ✅ Armable + LocalPos + Home OK"); break
+                if elapsed > 30.0:
+                    self._log("  ⚠ 타임아웃(30s) → 강제 진행"); break
 
             # arm → setpoint → offboard
             for _attempt in range(5):
