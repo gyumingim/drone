@@ -1904,30 +1904,41 @@ class UWBApp:
             self._log(f"  🔭 Vision 주입 시작: MAVSDK mocap  {CFG['vision_rate_hz']}Hz")
 
             if MODE == "REAL":
-                # REAL: vision-only → EKF 수렴 대기 필요
                 self._log("  UWB vision 수렴 대기 (3s)...")
                 await asyncio.sleep(3.0)
             else:
-                # SITL: 연결 직후 첫 health 메시지가 stale True일 수 있음
-                # GPS/EKF2 완전 초기화 전에 arm 시도 막으려면 최소 대기 필요
                 self._log("  EKF2/GPS 초기화 대기 (3s)...")
                 await asyncio.sleep(3.0)
 
-            # 로컬 포지션 준비 대기 (SITL=GPS 기반, REAL=vision 수렴 후)
-            self._log("  로컬 포지션 대기...")
+            # is_armable: PX4가 실제로 arm 허용 가능 상태인지 직접 확인
+            # (is_local_position_ok만으로는 GCS체크 등 다른 실패 못 잡음)
+            self._log("  Arming 준비 대기...")
             t_health = asyncio.get_running_loop().time()
-            timeout  = 10.0 if MODE == "SITL" else 20.0
+            timeout  = 15.0 if MODE == "SITL" else 25.0
             async for h in drone.telemetry.health():
-                if h.is_local_position_ok:
-                    self._log("  ✅ 로컬 포지션 OK"); break
+                if h.is_armable:
+                    self._log("  ✅ is_armable OK"); break
                 if asyncio.get_running_loop().time() - t_health > timeout:
-                    self._log(f"  ⚠ 로컬 포지션 타임아웃 ({timeout:.0f}s)"
-                              + (" — UWB/EKF2_EV_CTRL 확인 필요" if MODE == "REAL" else ""))
+                    self._log(f"  ⚠ is_armable 타임아웃 ({timeout:.0f}s) — 강제 진행")
                     break
 
-            await drone.action.arm()
+            # offboard setpoint를 arm 전에 먼저 전송
+            # (PX4 offboard 모드는 setpoint 버퍼가 primed 되어야 함)
             await drone.offboard.set_position_ned(
                 PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
+
+            # arm — 최대 3회 재시도 (race condition 대응)
+            for _attempt in range(3):
+                try:
+                    await drone.action.arm()
+                    self._log("  ✅ Arm 성공"); break
+                except Exception as ae:
+                    if _attempt < 2:
+                        self._log(f"  ⚠ arm 실패({_attempt+1}/3): {ae} — 2s 후 재시도")
+                        await asyncio.sleep(2.0)
+                    else:
+                        raise
+
             await drone.offboard.start()
             self._log("  이륙...")
             await asyncio.sleep(CFG["takeoff_wait"])
