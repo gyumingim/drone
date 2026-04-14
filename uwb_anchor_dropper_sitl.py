@@ -1892,10 +1892,10 @@ class UWBApp:
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)    # 수평+수직 EV 퓨전 (GPS→EV 전환 안정화)
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)
                     await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
-                    await drone.param.set_param_int("EKF2_HGT_REF", 0)    # 고도 = 기압계 (EV z보다 신뢰성 높음)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=0(baro)")
+                    await drone.param.set_param_int("EKF2_HGT_REF", 3)
+                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=3(EV)")
                 except Exception:
                     await drone.param.set_param_int("EKF2_AID_MASK", 8)
                     await drone.param.set_param_int("NAV_GNSS_MASK", 0)
