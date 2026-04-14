@@ -1888,81 +1888,52 @@ class UWBApp:
                 if s.is_connected:
                     self._log("  ✅ 연결됨"); break
 
-            # PX4 파라미터 — SITL/REAL 공통으로 vision-only 모드
-            # 근거: GPS 유지 시 arming check가 계속 실패함 (구버전 동작 패턴 복원)
+            # PX4 공통 안전 파라미터 (SITL/REAL 모두)
             try:
                 await drone.param.set_param_int("NAV_RCL_ACT", 0)
-                await drone.param.set_param_int("NAV_DLL_ACT", 0)   # GCS 연결 필수 해제
+                await drone.param.set_param_int("NAV_DLL_ACT", 0)
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
-                await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-                await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)  # SITL 전원 체크 bypass
-                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)  # asyncio 지터(±20ms) 흡수 — 0ms 시 Δpos/Δt 속도 노이즈 폭발
-                await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
-                try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 1)   # bit0=수평만 — UWB z는 앵커 동일高로 GDOP 불량, 고도는 기압계 사용
-                    await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
-                    await drone.param.set_param_int("EKF2_HGT_REF", 0)   # 고도 기준 = 기압계 (EV z 신뢰 불가)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=1(수평), GPS_CTRL=0, HGT_REF=0(baro)")
-                except Exception:
-                    await drone.param.set_param_int("EKF2_AID_MASK", 8)
-                    await drone.param.set_param_int("NAV_GNSS_MASK", 0)
-                    self._log("  ✅ 파라미터(v1.13): EKF2_AID_MASK=8, ARM_WO_GPS=1")
+                await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)
+                if MODE == "SITL":
+                    # SITL: GPS 사용 — EKF2 기본값 유지, EV 파라미터 건드리지 않음
+                    self._log("  ✅ 파라미터: SITL GPS 모드 (EKF2 기본값)")
+                else:
+                    # REAL: GPS-denied, UWB EV 주입
+                    await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
+                    await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                    await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
+                    try:
+                        await drone.param.set_param_int("EKF2_EV_CTRL", 1)
+                        await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
+                        await drone.param.set_param_int("EKF2_HGT_REF", 0)
+                        self._log("  ✅ 파라미터: REAL GPS-denied (EV수평+baro)")
+                    except Exception:
+                        await drone.param.set_param_int("EKF2_AID_MASK", 8)
+                        await drone.param.set_param_int("NAV_GNSS_MASK", 0)
+                        self._log("  ✅ 파라미터(v1.13): EKF2_AID_MASK=8")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
-            pos_task    = asyncio.create_task(self._telemetry_task(drone))
-            vision_task = asyncio.create_task(self._vision_inject_task(drone))
-            # PX4 MAVLink 로그 캡처 태스크 — "Preflight Fail" 메시지를 Python 터미널에 출력
-            async def _px4_log_task():
-                try:
-                    async for st in drone.telemetry.status_text():
-                        if any(kw in st.text for kw in ("Preflight", "Arming denied", "arm", "Arm")):
-                            print(f"  [PX4] {st.text}", flush=True)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
-            log_task = asyncio.create_task(_px4_log_task())
-            self._log(f"  🔭 Vision 주입 시작 ({CFG['vision_rate_hz']}Hz) — EKF 수렴 대기...")
-            await asyncio.sleep(3.0)
+            pos_task = asyncio.create_task(self._telemetry_task(drone))
+            # SITL: GPS 사용 → vision inject 불필요
+            # REAL: UWB EV 주입 활성화
+            if MODE != "SITL":
+                vision_task = asyncio.create_task(self._vision_inject_task(drone))
+                self._log(f"  🔭 Vision 주입 시작 ({CFG['vision_rate_hz']}Hz) — EKF 수렴 대기...")
+                await asyncio.sleep(3.0)
 
-            # health 체크: local_position OK 2초 안정 대기 (EKF2 초기화 확인용)
-            # armable 체크 제거 — GPS-disabled AUTO_LOITER에서 armable=False가 정상임
-            # 이유: can_arm 비트맵에서 AUTO_LOITER 비트가 GPS 없으면 클리어됨
-            #       → offboard 모드 진입 후 arm 해야 함 (올바른 GPS-denied 시퀀스)
-            self._log("  [DBG] EKF local_position 안정 대기...")
+            # armable 대기
+            self._log("  GPS/EKF 수렴 대기...")
             t_health = asyncio.get_running_loop().time()
-            local_ok_since = None
             async for h in drone.telemetry.health():
                 elapsed = asyncio.get_running_loop().time() - t_health
-                self._log(
-                    f"  [DBG] {elapsed:.1f}s "
-                    f"local={h.is_local_position_ok} "
-                    f"global={h.is_global_position_ok} "
-                    f"armable={h.is_armable}"
-                )
-                if h.is_local_position_ok:
-                    if local_ok_since is None:
-                        local_ok_since = elapsed
-                    if elapsed - local_ok_since >= 2.0:
-                        self._log(f"  ✅ local_position 2s 안정"); break
-                else:
-                    local_ok_since = None
+                self._log(f"  [DBG] {elapsed:.1f}s armable={h.is_armable} local={h.is_local_position_ok}")
+                if h.is_armable:
+                    self._log("  ✅ Armable"); break
                 if elapsed > 20.0:
                     self._log("  ⚠ 타임아웃(20s) → 강제 진행"); break
 
-            # GPS-denied offboard 시퀀스:
-            # 1) setpoint 선전송 (offboard 진입 조건)
-            # 2) offboard 모드 진입 (disarmed 상태에서도 가능)
-            # 3) arm (offboard 모드에서는 GPS 없어도 local pos만으로 arm 가능)
-            await drone.offboard.set_position_ned(
-                PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
-            try:
-                await drone.offboard.start()
-                self._log("  ✅ Offboard 모드 진입 (disarmed)")
-            except Exception as oe:
-                self._log(f"  ⚠ Offboard 선진입 실패(무시): {oe}")
-
+            # arm → setpoint → offboard
             for _attempt in range(5):
                 try:
                     await drone.action.arm()
@@ -1974,13 +1945,9 @@ class UWBApp:
                     else:
                         raise
 
-            # arm 후 offboard 재확인 (선진입 실패했으면 여기서 다시 시도)
-            try:
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
-                await drone.offboard.start()
-            except Exception:
-                pass  # 이미 offboard면 무시
+            await drone.offboard.set_position_ned(
+                PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
+            await drone.offboard.start()
             self._log("  이륙...")
             await asyncio.sleep(CFG["takeoff_wait"])
 
