@@ -202,19 +202,25 @@ C = {
 #  Gazebo 모니터
 # ════════════════════════════════════════════════════════════════════════════
 
-# gz-transport Pose_V 구독에 필요한 클래스 – 모듈 레벨 사전 탐색
-# camera_detector.py 와 동일한 버전 자동 탐색 패턴 사용
+# ── gz-transport Python 바인딩 모듈 탐색 ──────────────────────────────────
+# camera_detector.py 와 동일한 버전 자동 탐색 패턴
+# ref: https://github.com/gazebosim/gz-transport/blob/gz-transport13/python/examples/publisher.py
 # ref: https://github.com/gazebosim/gz-transport/blob/gz-transport13/python/examples/subscriber.py
 _GZ_TRANSPORT_MOD = None
 _GZ_POSE_V_CLS    = None
+_GZ_EMPTY_CLS     = None
+_GZ_MSGS_V        = None
 for _v in (13, 14, 12, 11):
     try:
         _transport_mod = __import__(f"gz.transport{_v}", fromlist=["Node"])
-        _msgs_v = _v - 3
-        _msgs_mod = __import__(f"gz.msgs{_msgs_v}", fromlist=["pose_v_pb2"])
+        _msgs_v        = _v - 3
+        _msgs_mod      = __import__(
+            f"gz.msgs{_msgs_v}", fromlist=["pose_v_pb2", "empty_pb2"])
         _GZ_TRANSPORT_MOD = _transport_mod
         _GZ_POSE_V_CLS    = _msgs_mod.pose_v_pb2.Pose_V
-        print(f"[GZ Pose] gz.transport{_v} + gz.msgs{_msgs_v} 로드 완료")
+        _GZ_EMPTY_CLS     = _msgs_mod.empty_pb2.Empty
+        _GZ_MSGS_V        = _msgs_v
+        print(f"[GZ] gz.transport{_v} + gz.msgs{_msgs_v} 로드 완료")
         break
     except Exception:
         pass
@@ -222,12 +228,19 @@ for _v in (13, 14, 12, 11):
 
 class GazeboMonitor:
 
-    # ── gz-transport 동적 포즈 구독 (클래스 레벨, 1회 초기화) ──────────────
-    # ref: gazebosim/gz-transport Python subscriber 예제 동일 패턴
+    # ── gz-transport: 포즈 구독 (subscriber) ─────────────────────────────────
+    # ref: gazebosim/gz-transport Python subscriber 예제
     _pose_lock:   threading.Lock = threading.Lock()
-    _model_poses: dict           = {}  # model_name → (x_gz, y_gz, z_gz)
-    _pose_node                   = None  # Node 인스턴스 (GC 방지용 보관)
+    _model_poses: dict           = {}   # model_name → (x_gz, y_gz, z_gz)
+    _pose_node                   = None  # Node 레퍼런스 (GC 방지)
     _pose_sub_ok: bool           = False
+
+    # ── gz-transport: attach/detach 퍼블리셔 (publisher) ─────────────────────
+    # ref: gazebosim/gz-transport Python publisher 예제
+    # ref: gz-sim8 detachable_joint.sdf 예제의 topic 사용 패턴
+    _pub_node    = None   # Node 레퍼런스 (GC 방지)
+    _attach_pub  = None   # Publisher for /drone/gripper/attach
+    _detach_pub  = None   # Publisher for /drone/gripper/detach
 
     @classmethod
     def _ensure_pose_sub(cls):
@@ -242,13 +255,31 @@ class GazeboMonitor:
                 cls._on_pose_msg,
             )
             if ok:
-                cls._pose_node   = node   # 레퍼런스 유지 (GC 방지)
+                cls._pose_node   = node
                 cls._pose_sub_ok = True
-                print("[GZ Pose] /dynamic_pose/info 구독 성공")
+                print("[GZ] /dynamic_pose/info 구독 성공")
             else:
-                print("[GZ Pose] 구독 실패 — simulation 실행 중인지 확인")
+                print("[GZ] pose 구독 실패 — simulation 실행 중인지 확인")
         except Exception as ex:
-            print(f"[GZ Pose] 구독 초기화 오류: {ex}")
+            print(f"[GZ] pose 구독 초기화 오류: {ex}")
+
+    @classmethod
+    def _ensure_publishers(cls):
+        """gz-transport attach/detach 퍼블리셔 1회 초기화.
+        ref: gazebosim/gz-transport/python/examples/publisher.py
+        """
+        if cls._attach_pub is not None or _GZ_TRANSPORT_MOD is None:
+            return
+        try:
+            node = _GZ_TRANSPORT_MOD.Node()
+            cls._attach_pub = node.advertise(
+                "/drone/gripper/attach", _GZ_EMPTY_CLS)
+            cls._detach_pub = node.advertise(
+                "/drone/gripper/detach", _GZ_EMPTY_CLS)
+            cls._pub_node = node   # GC 방지
+            print("[GZ] gripper attach/detach 퍼블리셔 초기화 완료")
+        except Exception as ex:
+            print(f"[GZ] publisher 초기화 오류: {ex}")
 
     @classmethod
     def _on_pose_msg(cls, msg):
@@ -557,33 +588,63 @@ class GazeboMonitor:
         return None
 
     @staticmethod
-    def attach_payload(world: str = "default"):
-        """DetachableJoint: 그리퍼에 페이로드 연결 (1회 topic publish)."""
+    def attach_payload(world: str = "default") -> bool:
+        """DetachableJoint: 그리퍼에 페이로드 연결.
+
+        우선순위:
+          1) gz-transport Python API (node.advertise + pub.publish)
+             ref: gazebosim/gz-transport/python/examples/publisher.py
+          2) fallback: gz topic CLI (-p "unused: true")
+             ref: gz-sim8 detachable_joint.sdf 공식 예제 커맨드
+        """
+        GazeboMonitor._ensure_publishers()
+        if GazeboMonitor._attach_pub is not None:
+            ok = GazeboMonitor._attach_pub.publish(_GZ_EMPTY_CLS())
+            if not ok:
+                print("[GZ] attach publish 실패 (publisher not ready?)")
+            return ok
+        # fallback CLI — gz-sim8 공식 예제: -p "unused: true"
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["gz", "topic", "-t", "/drone/gripper/attach",
-                 "-m", "gz.msgs.Empty", "-p", ""],
+                 "-m", "gz.msgs.Empty", "-p", "unused: true"],
                 capture_output=True, timeout=3
             )
-        except Exception:
-            pass
+            return r.returncode == 0
+        except Exception as ex:
+            print(f"[GZ] attach CLI 오류: {ex}")
+            return False
 
     @staticmethod
     def detach_payload(world: str = "default") -> bool:
-        """DetachableJoint: 그리퍼에서 페이로드 해제. 성공 여부 반환."""
+        """DetachableJoint: 그리퍼에서 페이로드 해제.
+
+        우선순위:
+          1) gz-transport Python API (pub.publish)
+             ref: gazebosim/gz-transport/python/examples/publisher.py
+          2) fallback: gz topic CLI (-p "unused: true")
+             ref: gz-sim8 detachable_joint.sdf 공식 예제 커맨드
+        """
+        GazeboMonitor._ensure_publishers()
+        if GazeboMonitor._detach_pub is not None:
+            ok = GazeboMonitor._detach_pub.publish(_GZ_EMPTY_CLS())
+            if not ok:
+                print("[GZ] detach publish 실패 (publisher not ready?)")
+            return ok
+        # fallback CLI — gz-sim8 공식 예제: -p "unused: true"
         try:
             r = subprocess.run(
                 ["gz", "topic", "-t", "/drone/gripper/detach",
-                 "-m", "gz.msgs.Empty", "-p", ""],
+                 "-m", "gz.msgs.Empty", "-p", "unused: true"],
                 capture_output=True, timeout=3
             )
             if r.returncode != 0:
                 err = r.stderr.decode(errors="ignore").strip()[:80]
-                print(f"[GZ] detach 토픽 전송 실패 (rc={r.returncode}): {err}")
+                print(f"[GZ] detach CLI 실패 (rc={r.returncode}): {err}")
                 return False
             return True
         except Exception as ex:
-            print(f"[GZ] detach 오류: {ex}")
+            print(f"[GZ] detach CLI 오류: {ex}")
             return False
 
     @staticmethod
