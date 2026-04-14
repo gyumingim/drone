@@ -457,6 +457,30 @@ class GazeboMonitor:
         return None
 
     @staticmethod
+    def attach_payload(world: str = "default"):
+        """DetachableJoint: 그리퍼에 페이로드 연결 (1회 topic publish)."""
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", "/drone/gripper/attach",
+                 "-m", "gz.msgs.Empty", "-p", ""],
+                capture_output=True, timeout=3
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def detach_payload(world: str = "default"):
+        """DetachableJoint: 그리퍼에서 페이로드 해제 → 물리 낙하."""
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", "/drone/gripper/detach",
+                 "-m", "gz.msgs.Empty", "-p", ""],
+                capture_output=True, timeout=3
+            )
+        except Exception:
+            pass
+
+    @staticmethod
     def park_payload(world: str = "default"):
         """페이로드를 지하 파킹 (z=-10)."""
         GazeboMonitor.set_payload_pose(0., 0., -10., world)
@@ -672,7 +696,7 @@ class UWBApp:
         self._rover_paused       = False
         self._rover_pause_evt    = threading.Event()
         self._rover_pause_evt.set()   # 기본: 주행 중 (clear=정지)
-        self._release_payload_evt: asyncio.Event = None  # asyncio 루프에서 초기화
+        self._payload_attached = False   # DetachableJoint 연결 상태
         self._rover_pos_time     = 0.0  # 마지막 rover_pos 갱신 시각
 
         self.spacing_var     = tk.DoubleVar(value=ANCHOR_SPACING)
@@ -1679,7 +1703,7 @@ class UWBApp:
         speed        = CFG["rover_speed"]
         total_time   = path_len / speed   # 등속 기준 총 소요 시간
         dt           = 0.05               # 20Hz 틱
-        gz_interval  = 0.1               # 10Hz Gazebo 갱신 (0.5→0.1: 순간이동 제거)
+        gz_interval  = 0.2               # 5Hz Gazebo 갱신 (직접 호출이라 부담 없음)
         # tau: 선형 시간 진행 (0→1), t: smoothstep 위치 (ease-in/out)
         tau     = self.rover_t            # 보통 0에서 시작
         last_gz = 0.0
@@ -1696,14 +1720,12 @@ class UWBApp:
             t = tau * tau * (3.0 - 2.0 * tau)
             self.root.after(0, lambda tt=t: self._update_rover_pos(tt))
             tau = min(1.0, tau + dt / total_time)
-            # Gazebo 위치 갱신 (10Hz)
+            # Gazebo 위치 갱신 (5Hz) — 이미 별도 스레드이므로 직접 호출
             now = time.monotonic()
             if now - last_gz >= gz_interval and self.rover_pos:
                 last_gz = now
                 rn, re  = self.rover_pos
-                threading.Thread(target=GazeboMonitor.move_rover,
-                                 args=(rn, re, CFG["gz_world"]),
-                                 daemon=True).start()
+                GazeboMonitor.move_rover(rn, re, CFG["gz_world"])
             time.sleep(dt)
 
     def _sim_descend_ascend(self, n, e, flight_alt, drop_alt, on_grab=None):
@@ -1865,21 +1887,6 @@ class UWBApp:
         self._log("  ⚠ 카메라 정렬 타임아웃 — 추정 위치로 픽업")
         return n, e
 
-    async def _hold_payload_task(self, world: str):
-        """드론 그리퍼 위치에 페이로드를 20Hz로 추종 (kinematic attach).
-        _release_payload_evt 가 set 되면 추종 중단 → 물리 낙하 시작."""
-        GRIPPER_Z_OFFSET = 0.30   # 드론 중심 기준 아래 (m)
-        while not self._release_payload_evt.is_set():
-            if self.drone_pos is not None:
-                dn, de, dalt = self.drone_pos
-                gz_z = max(0.175, dalt - GRIPPER_Z_OFFSET)
-                threading.Thread(
-                    target=GazeboMonitor.set_payload_pose,
-                    args=(dn, de, gz_z, world),
-                    daemon=True,
-                ).start()
-            await asyncio.sleep(0.05)   # 20 Hz
-
     async def _real_fly_pick(self, drone, dest_n, dest_e, on_grab=None,
                               anchor_name: str = None):
         await drone.offboard.set_position_ned(
@@ -1899,16 +1906,16 @@ class UWBApp:
             on_grab()
         # ── 물리 픽업 (SITL) ──────────────────────────────────────────────
         if MODE == "SITL":
-            # 1) 페이로드를 앵커 위치에 순간이동 (집는 시각 효과)
+            # 1) 페이로드를 앵커 위치로 순간이동 (집기 직전 위치 맞추기)
             GazeboMonitor.set_payload_pose(
                 dest_n, dest_e, 0.175, CFG["gz_world"])
             await asyncio.sleep(0.3)
-            # 2) 원본 앵커 모델 제거 (집었으므로 사라짐)
+            # 2) 원본 앵커 모델 제거
             if anchor_name:
                 GazeboMonitor.despawn(anchor_name, CFG["gz_world"])
-            # 3) 드론 추종 태스크 시작
-            self._release_payload_evt = asyncio.Event()
-            asyncio.create_task(self._hold_payload_task(CFG["gz_world"]))
+            # 3) DetachableJoint 연결 → 이후 subprocess 호출 없이 물리적으로 추종
+            GazeboMonitor.attach_payload(CFG["gz_world"])
+            self._payload_attached = True
         # ─────────────────────────────────────────────────────────────────
         try:
             await drone.gripper.grab()
@@ -1943,18 +1950,18 @@ class UWBApp:
             PositionNedYaw(dest_n, dest_e, CFG["drop_alt"], 0.))
         await asyncio.sleep(2.0)
         # ── 물리 드롭 (SITL) ──────────────────────────────────────────────
-        if MODE == "SITL" and self._release_payload_evt:
-            # 1) 추종 중단 → 페이로드가 마지막 위치에 멈춤
-            self._release_payload_evt.set()
-            await asyncio.sleep(0.15)       # 추종 태스크 종료 대기
-            # 2) 중력 낙하 시뮬 (drop_alt ~0.5m → 약 0.32s, 여유 0.6s)
-            await asyncio.sleep(0.6)
-            # 3) 실제 착지 위치 조회 → 정적 앵커 스폰 위치로 사용
+        if MODE == "SITL" and self._payload_attached:
+            # 1) DetachableJoint 해제 → 페이로드가 관성+중력으로 낙하
+            GazeboMonitor.detach_payload(CFG["gz_world"])
+            self._payload_attached = False
+            # 2) 물리 낙하 대기 (drop_alt ~0.5m, 중력 낙하 ~0.32s + 여유)
+            await asyncio.sleep(0.8)
+            # 3) 착지 위치 조회 → 정적 앵커 스폰 위치 보정
             final = GazeboMonitor.get_payload_pose(CFG["gz_world"])
-            if final and abs(final[0] - dest_n) < 1.0:
+            if final and abs(final[0] - dest_n) < 1.5:
                 dest_n, dest_e = final[0], final[1]
-                self._log(f"  📍 낙하 최종위치: N={dest_n:.2f} E={dest_e:.2f}")
-            # 4) 페이로드 파킹 (다음 픽업에 재사용)
+                self._log(f"  📍 낙하위치: N={dest_n:.2f} E={dest_e:.2f}")
+            # 4) 페이로드 파킹 (다음 픽업 재사용)
             threading.Thread(target=GazeboMonitor.park_payload,
                              args=(CFG["gz_world"],), daemon=True).start()
         # ─────────────────────────────────────────────────────────────────
@@ -2205,9 +2212,10 @@ class UWBApp:
                 pass
         finally:
             self._stop_rover_drive()
-            # 페이로드 추종 중단 + Gz 모델 제거
-            if self._release_payload_evt:
-                self._release_payload_evt.set()
+            # 페이로드 해제 + Gz 모델 제거
+            if self._payload_attached:
+                GazeboMonitor.detach_payload(CFG["gz_world"])
+                self._payload_attached = False
             if MODE == "SITL":
                 threading.Thread(target=GazeboMonitor.despawn_payload,
                                  args=(CFG["gz_world"],), daemon=True).start()
