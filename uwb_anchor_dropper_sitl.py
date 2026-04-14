@@ -201,7 +201,65 @@ C = {
 # ════════════════════════════════════════════════════════════════════════════
 #  Gazebo 모니터
 # ════════════════════════════════════════════════════════════════════════════
+
+# gz-transport Pose_V 구독에 필요한 클래스 – 모듈 레벨 사전 탐색
+# camera_detector.py 와 동일한 버전 자동 탐색 패턴 사용
+# ref: https://github.com/gazebosim/gz-transport/blob/gz-transport13/python/examples/subscriber.py
+_GZ_TRANSPORT_MOD = None
+_GZ_POSE_V_CLS    = None
+for _v in (13, 14, 12, 11):
+    try:
+        _transport_mod = __import__(f"gz.transport{_v}", fromlist=["Node"])
+        _msgs_v = _v - 3
+        _msgs_mod = __import__(f"gz.msgs{_msgs_v}", fromlist=["pose_v_pb2"])
+        _GZ_TRANSPORT_MOD = _transport_mod
+        _GZ_POSE_V_CLS    = _msgs_mod.pose_v_pb2.Pose_V
+        print(f"[GZ Pose] gz.transport{_v} + gz.msgs{_msgs_v} 로드 완료")
+        break
+    except Exception:
+        pass
+
+
 class GazeboMonitor:
+
+    # ── gz-transport 동적 포즈 구독 (클래스 레벨, 1회 초기화) ──────────────
+    # ref: gazebosim/gz-transport Python subscriber 예제 동일 패턴
+    _pose_lock:   threading.Lock = threading.Lock()
+    _model_poses: dict           = {}  # model_name → (x_gz, y_gz, z_gz)
+    _pose_node                   = None  # Node 인스턴스 (GC 방지용 보관)
+    _pose_sub_ok: bool           = False
+
+    @classmethod
+    def _ensure_pose_sub(cls):
+        """gz-transport /dynamic_pose/info 구독 1회 초기화."""
+        if cls._pose_sub_ok or _GZ_TRANSPORT_MOD is None:
+            return
+        try:
+            node = _GZ_TRANSPORT_MOD.Node()
+            ok   = node.subscribe(
+                _GZ_POSE_V_CLS,
+                "/world/default/dynamic_pose/info",
+                cls._on_pose_msg,
+            )
+            if ok:
+                cls._pose_node   = node   # 레퍼런스 유지 (GC 방지)
+                cls._pose_sub_ok = True
+                print("[GZ Pose] /dynamic_pose/info 구독 성공")
+            else:
+                print("[GZ Pose] 구독 실패 — simulation 실행 중인지 확인")
+        except Exception as ex:
+            print(f"[GZ Pose] 구독 초기화 오류: {ex}")
+
+    @classmethod
+    def _on_pose_msg(cls, msg):
+        """Pose_V 콜백 — 수신된 모든 entity pose 캐시."""
+        with cls._pose_lock:
+            for pose in msg.pose:
+                cls._model_poses[pose.name] = (
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z,
+                )
 
     def __init__(self, on_update, world="default"):
         self._on_update = on_update
@@ -451,46 +509,49 @@ class GazeboMonitor:
     def get_payload_pose(world: str = "default"):
         """페이로드 현재 위치 반환 (n, e, z_m). 실패 시 None.
 
-        gz model -m uwb_payload -p 출력 예시:
-          Pose [ XYZ (m) ] [ RPY (rad) ]:
-              [  1.97000  0.10000  0.17500 ]
-              [  0.00000  0.00000  0.00000 ]
-        → 첫 번째 [ X Y Z ] 브래킷에서 파싱 (entity ID 등 앞 숫자 스킵)
+        우선순위:
+          1) gz-transport Pose_V 구독 캐시 (zero-subprocess, 실시간)
+             ref: gazebosim/gz-transport Python subscriber 패턴
+          2) fallback: gz model -m uwb_payload -p CLI 파싱
         """
+        # ① gz-transport 캐시 우선 사용 ─────────────────────────────────────
+        GazeboMonitor._ensure_pose_sub()
+        if GazeboMonitor._pose_sub_ok:
+            with GazeboMonitor._pose_lock:
+                # model pose ("uwb_payload") 또는 link pose ("uwb_payload::link")
+                p = (GazeboMonitor._model_poses.get("uwb_payload")
+                     or GazeboMonitor._model_poses.get("uwb_payload::link"))
+            if p:
+                x, y, z = p   # Gz ENU: x=East, y=North
+                return (y, x, z)  # → (North, East, z)
+
+        # ② fallback: gz model -p CLI (gz-transport 미사용 환경) ─────────────
         import re as _re
         try:
             r = subprocess.run(
                 ["gz", "model", "-m", "uwb_payload", "-p"],
                 capture_output=True, text=True, timeout=3
             )
-            if r.returncode != 0 or not r.stdout.strip():
-                return None
-            # [ X  Y  Z ] 형태의 첫 번째 브래킷에서 xyz 추출
-            m = _re.search(
-                r'\[\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
-                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
-                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*\]',
-                r.stdout)
-            if m:
-                x = float(m.group(1))  # Gz ENU East
-                y = float(m.group(2))  # Gz ENU North
-                z = float(m.group(3))  # Gz Up
-                return (y, x, z)       # → (North, East, z)
-            # fallback: -p 없이 재시도 (이전 gz 버전 호환)
-            r2 = subprocess.run(
-                ["gz", "model", "-m", "uwb_payload"],
-                capture_output=True, text=True, timeout=3
-            )
-            m2 = _re.search(
-                r'\[\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
-                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
-                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*\]',
-                r2.stdout)
-            if m2:
-                x = float(m2.group(1))
-                y = float(m2.group(2))
-                z = float(m2.group(3))
-                return (y, x, z)
+            if r.returncode == 0 and r.stdout.strip():
+                # "-p" flag: "x y z roll pitch yaw" 한 줄 또는
+                #            "[ x  y  z ]" 브래킷 형식 (버전마다 다름)
+                # 브래킷 패턴 우선, 없으면 첫 6개 숫자에서 앞 3개 취함
+                m = _re.search(
+                    r'\[\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                    r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                    r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*\]',
+                    r.stdout)
+                if m:
+                    return (float(m.group(2)),   # y = North
+                            float(m.group(1)),   # x = East
+                            float(m.group(3)))   # z
+                nums = _re.findall(
+                    r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", r.stdout)
+                if len(nums) >= 3:
+                    # "-p" 단독 출력은 entity ID 없이 x y z 순서 보장
+                    return (float(nums[1]),  # y = North
+                            float(nums[0]),  # x = East
+                            float(nums[2]))
         except Exception as ex:
             print(f"[GZ] get_payload_pose 오류: {ex}")
         return None
