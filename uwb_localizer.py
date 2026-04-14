@@ -152,6 +152,11 @@ class UWBPositionEKF:
         self._qv           = sigma_proc_vel
         self._t            = None
 
+        # NIS (Normalized Innovation Squared) 히스토리
+        # 1-DOF chi2 기대값 = 1.0, 95% 구간 [0.004, 5.024]
+        self._nis_history: list = []
+        self._NIS_WINDOW = 100
+
         if HAS_SCIPY:
             self.x = np.array([pos0[0], pos0[1], pos0[2],
                                 0., 0., 0.], dtype=float)
@@ -217,6 +222,11 @@ class UWBPositionEKF:
         K      = self.P @ H / S
         self.x += K * innov
         self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
+        # NIS: 정규화 혁신 제곱 (1-DOF chi2 분포 기대값 = 1.0)
+        nis = (innov ** 2) / S
+        self._nis_history.append(nis)
+        if len(self._nis_history) > self._NIS_WINDOW:
+            self._nis_history.pop(0)
         return innov
 
     def update_altitude(self, z_ned: float, sigma: float = 0.3):
@@ -236,6 +246,25 @@ class UWBPositionEKF:
         K    = self.P @ H / S
         self.x += K * innov
         self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
+
+    def update_position_fix(self, n: float, e: float, sigma_h: float = 0.15):
+        """
+        직접 NE 위치 보정 — 카메라 정렬 결과 등 외부 절대 위치 측정값 주입.
+        각 축을 독립 스칼라 측정으로 순차 처리.
+        sigma_h: 수평 1σ (m). 카메라 정렬 전형적 정확도 ~0.1–0.2m.
+        """
+        if not self._ok() or not self.initialized:
+            return
+        for i, xi in enumerate([n, e]):
+            innov = xi - self.x[i]
+            if abs(innov) > 3.0:   # 3m 초과 = 노이즈로 거부
+                continue
+            H    = np.zeros(6); H[i] = 1.0
+            r    = sigma_h ** 2
+            S    = float(H @ self.P @ H) + r
+            K    = self.P @ H / S
+            self.x += K * innov
+            self.P  = (np.eye(6) - np.outer(K, H)) @ self.P
 
     def initialize_from_trilateration(self, pos: tuple):
         if not self._ok():
@@ -263,6 +292,27 @@ class UWBPositionEKF:
         return (float(math.sqrt(abs(self.P[0, 0]))),
                 float(math.sqrt(abs(self.P[1, 1]))),
                 float(math.sqrt(abs(self.P[2, 2]))))
+
+    def get_filter_health(self) -> dict:
+        """
+        NIS 기반 필터 건강 지표.
+
+        NIS: 1-DOF chi2 분포 기대값=1.0, 95% 구간 [0.004, 5.024]
+          nis_mean < 1: 필터가 과-신뢰 (P 과소 추정) → 이상 없음
+          nis_mean ≈ 1: 정상
+          nis_mean > 5: 필터 diverge 의심 (측정 노이즈 과소/과대 설정)
+        p_trace: 공분산 행렬 대각합 → 작을수록 불확실도 낮음
+        """
+        if len(self._nis_history) < 5:
+            return {"nis_mean": None, "nis_ok": None, "p_trace": None}
+        nis_mean = sum(self._nis_history) / len(self._nis_history)
+        nis_ok   = nis_mean < 5.024   # 95% chi2(1) 상한
+        p_trace  = float(np.trace(self.P)) if self._ok() else None
+        return {
+            "nis_mean": round(nis_mean, 3),
+            "nis_ok"  : nis_ok,
+            "p_trace" : round(p_trace, 4) if p_trace is not None else None,
+        }
 
 
 # ════════════════════════════════════════════════════════════════
@@ -375,6 +425,9 @@ class UWBLocalizer:
         # EKF fuse 타임스탬프 (self._ekf._t 직접 접근 대신 사용)
         self._last_fuse_t: float | None = None
 
+        # Dropout 감지: 마지막으로 위치가 갱신된 시각
+        self._last_measurement_t: float = 0.0
+
     # ── 시작/종료 ─────────────────────────────────────────────────
 
     def start(self):
@@ -439,12 +492,17 @@ class UWBLocalizer:
                 "ok"        : abs(mean) < 0.3 and std < 0.5,
                 "rejections": self._anchor_rejections.get(aid, 0),
             }
+        now          = time.monotonic()
+        dropout_sec  = now - self._last_measurement_t if self._last_measurement_t else None
         return {
-            "gdop"         : self._gdop,
-            "sigma"        : self._ekf.get_pos_uncertainty(),
-            "velocity"     : self._ekf.get_velocity(),
-            "n_anchors"    : self._n_used,
-            "anchor_health": health,
+            "gdop"          : self._gdop,
+            "sigma"         : self._ekf.get_pos_uncertainty(),
+            "velocity"      : self._ekf.get_velocity(),
+            "n_anchors"     : self._n_used,
+            "anchor_health" : health,
+            "filter_health" : self._ekf.get_filter_health(),
+            "dropout_sec"   : round(dropout_sec, 1) if dropout_sec is not None else None,
+            "in_dropout"    : (dropout_sec > 2.0) if dropout_sec is not None else False,
         }
 
     # ── 외부 상태 주입 ────────────────────────────────────────────
@@ -464,6 +522,14 @@ class UWBLocalizer:
         _telemetry_task에서 PX4 고도를 50Hz로 전달하면 Z σ 크게 개선됨.
         """
         self._ekf.update_altitude(-alt_m, sigma)  # alt(위+) → NED(아래+)
+
+    def update_camera_fix(self, n: float, e: float, sigma_h: float = 0.15):
+        """
+        카메라 정렬에서 얻은 NE 위치 보정을 EKF에 직접 주입.
+        _cam_align() 각 스텝에서 드론 추정 위치가 확정되면 호출.
+        sigma_h: 픽셀→NED 변환 정확도. 기본 0.15m (카메라 정렬 오차).
+        """
+        self._ekf.update_position_fix(n, e, sigma_h)
 
     def add_sitl_anchor(self, n: float, e: float, z: float = 0.,
                         pos_uncertainty: float = 0.15,
@@ -535,6 +601,7 @@ class UWBLocalizer:
             with self._lock:
                 self._pos      = pos
                 self._pos_time = time.monotonic()
+            self._last_measurement_t = time.monotonic()
 
         # GDOP
         if pos and HAS_SCIPY:
@@ -576,12 +643,10 @@ class UWBLocalizer:
             ap = self._get_anchor_ned(aid, info.get("pos"))
             if not ap:
                 continue
-            # QF(0~100) → 측정 노이즈 sigma: QF=100→0.05m, QF=0→0.5m
-            qf    = info.get("qf", 50)
-            sigma = 0.05 + 0.0045 * (100 - max(0, min(100, qf)))
-            # QF<30: NLOS 판정 → σ 3배 패널티
-            if qf < 30:
-                sigma *= 3.0
+            # QF(0~100) → 측정 노이즈 sigma: 연속 2차 곡선 (하드 임계 없음)
+            # QF=100→0.05m  QF=50→0.41m  QF=30→0.76m  QF=0→1.50m
+            qf_norm = max(0.0, min(100.0, float(info.get("qf", 50)))) / 100.0
+            sigma   = 0.05 + 1.45 * (1.0 - qf_norm) ** 2
             innov = self._ekf.update(np.array(ap, dtype=float),
                                      info["dist_m"], sigma=sigma)
             # 잔차 기록 (앵커 건강 모니터링용)

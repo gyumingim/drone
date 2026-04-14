@@ -78,11 +78,18 @@ except ImportError:
         def stop(self): pass
         def get_position(self, max_age=2.0): return None
         def get_distances(self): return {}
-        def get_quality(self): return {"sigma": (999,999,999)}
+        def get_quality(self): return {
+            "sigma"        : (999, 999, 999),
+            "filter_health": {"nis_mean": None, "nis_ok": None, "p_trace": None},
+            "in_dropout"   : False,
+            "dropout_sec"  : None,
+            "anchor_health": {},
+        }
         def set_sitl_drone_pos(self, n, e, z): pass
         def set_drone_velocity(self, n, e, z): pass
         def set_baro_altitude(self, a): pass
         def add_sitl_anchor(self, n, e, z=0.): pass
+        def update_camera_fix(self, n, e, sigma_h=0.15): pass
 
 from mavsdk.mocap import (VisionPositionEstimate as _VPE,
                           PositionBody as _PosBody,
@@ -1289,13 +1296,28 @@ class UWBApp:
         nrel  = sum(1 for s in self.mission_steps if s["type"] == "relocate")
         nskip = sum(1 for s in self.mission_steps if s["type"] == "skip")
         dist  = math.hypot(n1-n0, e1-e0)
+
+        # GDOP 계산: 기존 앵커 + 신규 앵커 합산, 경로 중간점 기준
+        from uwb_localizer import compute_gdop
+        anch_z  = 0.5   # 앵커 설치 높이 (지면 기준 m)
+        all_anch = (
+            [(a["n"], a["e"], anch_z) for a in EXISTING_ANCHORS]
+            + [(n, e, anch_z) for (n, e) in self.preview]
+        )
+        mid_n   = (n0 + n1) / 2
+        mid_e   = (e0 + e1) / 2
+        fly_z   = -abs(CFG["flight_alt"])   # NED (음수 = 위)
+        gdop    = compute_gdop(all_anch, (mid_n, mid_e, fly_z))
+        gdop_warn = f"  ⚠ GDOP {gdop:.1f} > 6 — 앵커 배치 불량\n" if gdop > 6.0 else ""
+
         self.info_var.set(
             f"경로: {dist:.1f} m\n"
             f"채택: {len(self.preview)}개  (L:{L} R:{R})\n"
             f"배제: {len(blocked)}개\n"
             f"디포픽업: {ndep}  재배치: {nrel}\n"
             + (f"⚠ 미설치: {nskip}개\n" if nskip else "")
-            + f"간격 {self.spacing_var.get():.1f}m  폭 {self.width_var.get():.1f}m")
+            + gdop_warn
+            + f"GDOP {gdop:.1f}  간격 {self.spacing_var.get():.1f}m  폭 {self.width_var.get():.1f}m")
 
     def _slider_changed(self):
         self.lbl_spacing.config(text=f"{self.spacing_var.get():.1f} m")
@@ -1719,9 +1741,13 @@ class UWBApp:
                 cx, cy, iw, ih, abs(alt), CFG["camera_fov"])
             if abs(dn) < CFG["cam_align_tol"] and abs(de) < CFG["cam_align_tol"]:
                 self._log(f"  📷 정렬 완료: 오프셋 Δn={dn:.2f} Δe={de:.2f}")
+                # 카메라로 확정된 드론 위치를 UWB EKF에 주입 (측위 정확도 개선)
+                self.uwb.update_camera_fix(n, e, sigma_h=0.12)
                 return n, e
             # 오프셋 보정 이동
             n += dn; e += de
+            # 이동 후에도 UWB EKF에 추정 위치 주입 (카메라 보정값 반영)
+            self.uwb.update_camera_fix(n, e, sigma_h=0.20)
             await drone.offboard.set_position_ned(
                 PositionNedYaw(n, e, alt, 0.))
             await asyncio.sleep(CFG["cam_align_wait"])
@@ -2121,10 +2147,20 @@ class UWBApp:
         qual  = self.uwb.get_quality()
         sn, se, sz = qual["sigma"]
 
-        if pos:
+        fh = qual.get("filter_health", {})
+        nis_str = ""
+        if fh and fh.get("nis_mean") is not None:
+            nis_icon = "" if fh["nis_ok"] else "⚠"
+            nis_str  = f"  NIS:{fh['nis_mean']:.2f}{nis_icon}"
+
+        if qual.get("in_dropout"):
+            self.uwb_pos_lbl.config(
+                text=f"📡 UWB: 드롭아웃 {qual['dropout_sec']:.0f}s",
+                fg="#ff6060")
+        elif pos:
             self.uwb_pos_lbl.config(
                 text=(f"📡 N:{pos[0]:.2f} E:{pos[1]:.2f} Z:{pos[2]:.2f}"
-                      f"  σ({sn:.2f},{se:.2f})"),
+                      f"  σ({sn:.2f},{se:.2f}){nis_str}"),
                 fg="#a0d8ff")
         elif dists:
             self.uwb_pos_lbl.config(
@@ -2132,6 +2168,15 @@ class UWBApp:
                 fg=C["rover"])
         else:
             self.uwb_pos_lbl.config(text="📡 UWB: 대기", fg=C["dim"])
+
+        # NIS 발산 경고 로그 (처음 한번만)
+        if fh and not fh.get("nis_ok") and fh.get("nis_mean") is not None:
+            if not getattr(self, "_nis_warned", False):
+                self._log(f"  ⚠ EKF NIS={fh['nis_mean']:.2f} > 5 — 필터 발산 가능"
+                          f"  (측정 노이즈 설정 확인)", "warn")
+                self._nis_warned = True
+        else:
+            self._nis_warned = False
 
         # 앵커 건강 경고 로그 (새로 나빠진 앵커만)
         health = qual.get("anchor_health", {})
