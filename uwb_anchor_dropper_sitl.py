@@ -1891,8 +1891,6 @@ class UWBApp:
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)  # SITL 전원 체크 bypass
-                _cbrk_val = (await drone.param.get_param_int("CBRK_SUPPLY_CHK")).value
-                self._log(f"  [DBG] CBRK_SUPPLY_CHK = {_cbrk_val} (expected 894281)")
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
@@ -1923,10 +1921,11 @@ class UWBApp:
             self._log(f"  🔭 Vision 주입 시작 ({CFG['vision_rate_hz']}Hz) — EKF 수렴 대기...")
             await asyncio.sleep(3.0)
 
-            # health 체크: local_position OK가 5초 이상 안정 or armable=True 될 때까지 대기
-            # 이유: EKF2는 local=True가 0.3s만에 뜨지만 완전 수렴은 5~8s 걸림
-            #       너무 일찍 arm하면 COMMAND_DENIED
-            self._log("  [DBG] health 체크 시작 (local 5s 안정 or armable=True 대기)...")
+            # health 체크: local_position OK 2초 안정 대기 (EKF2 초기화 확인용)
+            # armable 체크 제거 — GPS-disabled AUTO_LOITER에서 armable=False가 정상임
+            # 이유: can_arm 비트맵에서 AUTO_LOITER 비트가 GPS 없으면 클리어됨
+            #       → offboard 모드 진입 후 arm 해야 함 (올바른 GPS-denied 시퀀스)
+            self._log("  [DBG] EKF local_position 안정 대기...")
             t_health = asyncio.get_running_loop().time()
             local_ok_since = None
             async for h in drone.telemetry.health():
@@ -1935,41 +1934,48 @@ class UWBApp:
                     f"  [DBG] {elapsed:.1f}s "
                     f"local={h.is_local_position_ok} "
                     f"global={h.is_global_position_ok} "
-                    f"home={h.is_home_position_ok} "
-                    f"armable={h.is_armable} "
-                    f"gyro={h.is_gyrometer_calibration_ok} "
-                    f"accel={h.is_accelerometer_calibration_ok} "
-                    f"mag={h.is_magnetometer_calibration_ok}"
+                    f"armable={h.is_armable}"
                 )
                 if h.is_local_position_ok:
                     if local_ok_since is None:
                         local_ok_since = elapsed
-                    stable = elapsed - local_ok_since
-                    if h.is_armable:
-                        self._log(f"  ✅ armable=True ({elapsed:.1f}s) → arm 시도"); break
-                    if stable >= 5.0:
-                        self._log(f"  ✅ EKF 5s 안정 → arm 시도"); break
+                    if elapsed - local_ok_since >= 2.0:
+                        self._log(f"  ✅ local_position 2s 안정"); break
                 else:
-                    local_ok_since = None  # local 다시 False되면 리셋
-                if elapsed > 25.0:
-                    self._log("  ⚠ 타임아웃(25s) → 강제 진행")
-                    break
+                    local_ok_since = None
+                if elapsed > 20.0:
+                    self._log("  ⚠ 타임아웃(20s) → 강제 진행"); break
 
-            # arm → offboard setpoint → offboard.start (구버전 동작 순서)
-            for _attempt in range(3):
+            # GPS-denied offboard 시퀀스:
+            # 1) setpoint 선전송 (offboard 진입 조건)
+            # 2) offboard 모드 진입 (disarmed 상태에서도 가능)
+            # 3) arm (offboard 모드에서는 GPS 없어도 local pos만으로 arm 가능)
+            await drone.offboard.set_position_ned(
+                PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
+            try:
+                await drone.offboard.start()
+                self._log("  ✅ Offboard 모드 진입 (disarmed)")
+            except Exception as oe:
+                self._log(f"  ⚠ Offboard 선진입 실패(무시): {oe}")
+
+            for _attempt in range(5):
                 try:
                     await drone.action.arm()
                     self._log("  ✅ Arm 성공"); break
                 except Exception as ae:
-                    self._log(f"  ❌ arm 실패({_attempt+1}/3): {ae}")
-                    if _attempt < 2:
-                        await asyncio.sleep(2.0)
+                    self._log(f"  ❌ arm 실패({_attempt+1}/5): {ae}")
+                    if _attempt < 4:
+                        await asyncio.sleep(1.0)
                     else:
                         raise
 
-            await drone.offboard.set_position_ned(
-                PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
-            await drone.offboard.start()
+            # arm 후 offboard 재확인 (선진입 실패했으면 여기서 다시 시도)
+            try:
+                await drone.offboard.set_position_ned(
+                    PositionNedYaw(0., 0., CFG["flight_alt"], 0.))
+                await drone.offboard.start()
+            except Exception:
+                pass  # 이미 offboard면 무시
             self._log("  이륙...")
             await asyncio.sleep(CFG["takeoff_wait"])
 
