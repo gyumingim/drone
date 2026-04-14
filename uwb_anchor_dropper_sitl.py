@@ -1966,9 +1966,8 @@ class UWBApp:
             if final and abs(final[0] - dest_n) < 1.5:
                 dest_n, dest_e = final[0], final[1]
                 self._log(f"  📍 낙하위치: N={dest_n:.2f} E={dest_e:.2f}")
-            # 4) 페이로드 제거 (다음 픽업 때 새로 스폰)
-            threading.Thread(target=GazeboMonitor.despawn_payload,
-                             args=(CFG["gz_world"],), daemon=True).start()
+            # 4) 페이로드 제거는 다음 픽업 step-0에서 수행 (여기선 하지 않음)
+            # (백그라운드 스레드 제거: 다음 spawn 타이밍 레이스 컨디션 방지)
         # ─────────────────────────────────────────────────────────────────
         try:
             await drone.gripper.release()
