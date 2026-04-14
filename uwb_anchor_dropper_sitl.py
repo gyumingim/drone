@@ -1908,9 +1908,12 @@ class UWBApp:
             self._log(f"  🔭 Vision 주입 시작 ({CFG['vision_rate_hz']}Hz) — EKF 수렴 대기...")
             await asyncio.sleep(3.0)
 
-            # 디버그: health 전체 필드 로깅 → 어느 체크가 실패하는지 명확히 확인
-            self._log("  [DBG] health 체크 시작...")
+            # health 체크: local_position OK가 5초 이상 안정 or armable=True 될 때까지 대기
+            # 이유: EKF2는 local=True가 0.3s만에 뜨지만 완전 수렴은 5~8s 걸림
+            #       너무 일찍 arm하면 COMMAND_DENIED
+            self._log("  [DBG] health 체크 시작 (local 5s 안정 or armable=True 대기)...")
             t_health = asyncio.get_running_loop().time()
+            local_ok_since = None
             async for h in drone.telemetry.health():
                 elapsed = asyncio.get_running_loop().time() - t_health
                 self._log(
@@ -1924,9 +1927,17 @@ class UWBApp:
                     f"mag={h.is_magnetometer_calibration_ok}"
                 )
                 if h.is_local_position_ok:
-                    self._log("  ✅ local_position OK → arm 시도"); break
-                if elapsed > 15.0:
-                    self._log("  ⚠ 타임아웃(15s) — health 필드 확인 후 강제 진행")
+                    if local_ok_since is None:
+                        local_ok_since = elapsed
+                    stable = elapsed - local_ok_since
+                    if h.is_armable:
+                        self._log(f"  ✅ armable=True ({elapsed:.1f}s) → arm 시도"); break
+                    if stable >= 5.0:
+                        self._log(f"  ✅ EKF 5s 안정 → arm 시도"); break
+                else:
+                    local_ok_since = None  # local 다시 False되면 리셋
+                if elapsed > 25.0:
+                    self._log("  ⚠ 타임아웃(25s) → 강제 진행")
                     break
 
             # arm → offboard setpoint → offboard.start (구버전 동작 순서)
