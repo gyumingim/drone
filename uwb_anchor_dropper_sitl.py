@@ -449,20 +449,50 @@ class GazeboMonitor:
 
     @staticmethod
     def get_payload_pose(world: str = "default"):
-        """페이로드 현재 위치 반환 (n, e, z_m). 실패 시 None."""
+        """페이로드 현재 위치 반환 (n, e, z_m). 실패 시 None.
+
+        gz model -m uwb_payload -p 출력 예시:
+          Pose [ XYZ (m) ] [ RPY (rad) ]:
+              [  1.97000  0.10000  0.17500 ]
+              [  0.00000  0.00000  0.00000 ]
+        → 첫 번째 [ X Y Z ] 브래킷에서 파싱 (entity ID 등 앞 숫자 스킵)
+        """
         import re as _re
         try:
             r = subprocess.run(
+                ["gz", "model", "-m", "uwb_payload", "-p"],
+                capture_output=True, text=True, timeout=3
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return None
+            # [ X  Y  Z ] 형태의 첫 번째 브래킷에서 xyz 추출
+            m = _re.search(
+                r'\[\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*\]',
+                r.stdout)
+            if m:
+                x = float(m.group(1))  # Gz ENU East
+                y = float(m.group(2))  # Gz ENU North
+                z = float(m.group(3))  # Gz Up
+                return (y, x, z)       # → (North, East, z)
+            # fallback: -p 없이 재시도 (이전 gz 버전 호환)
+            r2 = subprocess.run(
                 ["gz", "model", "-m", "uwb_payload"],
                 capture_output=True, text=True, timeout=3
             )
-            nums = _re.findall(
-                r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", r.stdout)
-            if len(nums) >= 3:
-                x, y, z = float(nums[0]), float(nums[1]), float(nums[2])
-                return (y, x, z)   # Gz ENU x=East,y=North → (n, e, z)
-        except Exception:
-            pass
+            m2 = _re.search(
+                r'\[\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)'
+                r'\s+([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*\]',
+                r2.stdout)
+            if m2:
+                x = float(m2.group(1))
+                y = float(m2.group(2))
+                z = float(m2.group(3))
+                return (y, x, z)
+        except Exception as ex:
+            print(f"[GZ] get_payload_pose 오류: {ex}")
         return None
 
     @staticmethod
@@ -1985,10 +2015,11 @@ class UWBApp:
 
     async def _real_fly_drop(self, drone, dest_n, dest_e, anchor):
         self._log(f"  [DROP] 목표: N={dest_n:.2f} E={dest_e:.2f}")
-        # ── 비행 ──────────────────────────────────────────────────────────
+        # ── 비행 (payload 탑재 시 컨트롤러 수렴 느림 → timeout 40s) ─────────
         await drone.offboard.set_position_ned(
             PositionNedYaw(dest_n, dest_e, CFG["flight_alt"], 0.))
-        await self._wait_reach(drone, dest_n, dest_e)
+        await self._wait_reach(drone, dest_n, dest_e,
+                               timeout=40.0 if self._payload_attached else 20.0)
         self._log(f"  [DROP] 목표 상공 도착")
         # ── 하강 ──────────────────────────────────────────────────────────
         await drone.offboard.set_position_ned(
