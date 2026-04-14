@@ -1874,6 +1874,7 @@ class UWBApp:
     async def _mission_coro(self, steps: list, address: str = None):
         pos_task    = None   # finally 블록에서 NameError 방지
         vision_task = None
+        log_task    = None
         try:
             drone = System()
             await drone.connect(system_address=address or CFG["address"])
@@ -1890,6 +1891,8 @@ class UWBApp:
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)  # SITL 전원 체크 bypass
+                _cbrk_val = (await drone.param.get_param_int("CBRK_SUPPLY_CHK")).value
+                self._log(f"  [DBG] CBRK_SUPPLY_CHK = {_cbrk_val} (expected 894281)")
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
@@ -1906,6 +1909,17 @@ class UWBApp:
 
             pos_task    = asyncio.create_task(self._telemetry_task(drone))
             vision_task = asyncio.create_task(self._vision_inject_task(drone))
+            # PX4 MAVLink 로그 캡처 태스크 — "Preflight Fail" 메시지를 Python 터미널에 출력
+            async def _px4_log_task():
+                try:
+                    async for st in drone.telemetry.status_text():
+                        if any(kw in st.text for kw in ("Preflight", "Arming denied", "arm", "Arm")):
+                            print(f"  [PX4] {st.text}", flush=True)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            log_task = asyncio.create_task(_px4_log_task())
             self._log(f"  🔭 Vision 주입 시작 ({CFG['vision_rate_hz']}Hz) — EKF 수렴 대기...")
             await asyncio.sleep(3.0)
 
@@ -2067,6 +2081,8 @@ class UWBApp:
                 pos_task.cancel()
             if vision_task:
                 vision_task.cancel()
+            if log_task:
+                log_task.cancel()
             self.root.after(0, self._clear_drone_pos)
             self.root.after(0, lambda: self.btn_confirm.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
