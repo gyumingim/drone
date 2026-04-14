@@ -93,10 +93,8 @@ except ImportError:
         def update_camera_fix(self, n, e, sigma_h=0.15): pass
 
 from mavsdk.mocap import (VisionPositionEstimate as _VPE,
-                          VisionSpeedEstimate as _VSE,
                           PositionBody as _PosBody,
                           AngleBody as _AngBody,
-                          SpeedNed as _SpeedNed,
                           Covariance as _Cov)
 
 
@@ -1870,28 +1868,10 @@ class UWBApp:
                     except Exception:
                         pass
 
-                    # 속도 주입 — EKF2_EV_CTRL bit2=velocity 활성화 필요
-                    # UWB EKF 속도 상태 x[3..5] = (vn, ve, vd)
-                    # 이유: 속도 없으면 EKF2가 IMU dead-reckoning으로만 속도 추정 →
-                    #       MPC 컨트롤러 오버슈트 원인
-                    try:
-                        vel_tuple = self.uwb.get_quality().get("velocity")
-                        if vel_tuple:
-                            vn, ve, vd = vel_tuple
-                            sv = max(sn, se) * 2.0   # 속도 sigma ≈ 위치 sigma × 2
-                            vel_cov = [sv**2, NAN, NAN,
-                                              sv**2, NAN,
-                                                     (sz * 2.0)**2]
-                            await drone.mocap.set_vision_speed_estimate(
-                                _VSE(
-                                    time_usec        = 0,
-                                    speed_ned        = _SpeedNed(
-                                        float(vn), float(ve), float(vd)),
-                                    speed_covariance = _Cov(vel_cov),
-                                )
-                            )
-                    except Exception:
-                        pass
+                    # 속도 주입 제거:
+                    # VISION_SPEED_ESTIMATE(MAVLink 103)는 PX4에서 처리 안 됨 — mavlink_receiver.cpp에 핸들러 없음
+                    # ODOMETRY(MAVLink 331)가 유일한 EV velocity 주입 경로이나 현재 미구현
+                    # → EKF2_EV_CTRL=3(pos only)으로 복원, IMU+위치 미분으로 속도 추정
                 await asyncio.sleep(max(0., period - (time.monotonic() - t0)))
         except asyncio.CancelledError:
             pass
@@ -1916,13 +1896,13 @@ class UWBApp:
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 await drone.param.set_param_int("CBRK_SUPPLY_CHK", 894281)  # SITL 전원 체크 bypass
-                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                await drone.param.set_param_float("EKF2_EV_DELAY", 0.0)   # SITL 실제 지연 없음 — 25ms시 위치 오프셋 발생
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 7)   # bit0=horiz, bit1=vert, bit2=vel
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)   # bit0=horiz, bit1=vert (velocity 비트 제거 — ODOMETRY 없이 무의미)
                     await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
                     await drone.param.set_param_int("EKF2_HGT_REF", 3)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=7(pos+vel), GPS_CTRL=0, HGT_REF=3(EV)")
+                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3(pos only), GPS_CTRL=0, HGT_REF=3(EV)")
                 except Exception:
                     await drone.param.set_param_int("EKF2_AID_MASK", 8)
                     await drone.param.set_param_int("NAV_GNSS_MASK", 0)
