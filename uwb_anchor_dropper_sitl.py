@@ -279,6 +279,56 @@ class GazeboMonitor:
         except Exception:
             pass
 
+    @staticmethod
+    def spawn_rover(n: float, e: float, world: str = "default"):
+        """오렌지색 박스 로버 모델을 Gazebo에 스폰."""
+        sdf_xml = (
+            '<?xml version="1.0"?><sdf version="1.7">'
+            '<model name="rover_model"><static>true</static>'
+            '<link name="body">'
+            '<visual name="vis">'
+            '<geometry><box><size>0.6 0.4 0.25</size></box></geometry>'
+            '<material>'
+            '<ambient>1.0 0.55 0.0 1</ambient>'
+            '<diffuse>1.0 0.55 0.0 1</diffuse>'
+            '</material>'
+            '</visual>'
+            '</link></model></sdf>'
+        )
+        sdf_esc = sdf_xml.replace('"', '\\"')
+        req = (f'sdf: "{sdf_esc}" '
+               f'pose {{ position {{ x: {e} y: {n} z: 0.125 }} }} '
+               f'name: "rover_model"')
+        try:
+            subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/create",
+                 "--reqtype", "gz.msgs.EntityFactory",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "2000", "--req", req],
+                capture_output=True, timeout=5
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def move_rover(n: float, e: float, world: str = "default"):
+        """set_pose 서비스로 로버 위치 갱신 (2Hz)."""
+        req = f'name: "rover_model" position {{ x: {e} y: {n} z: 0.125 }}'
+        try:
+            subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/set_pose",
+                 "--reqtype", "gz.msgs.Pose",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "500", "--req", req],
+                capture_output=True, timeout=2
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def despawn_rover(world: str = "default"):
+        GazeboMonitor.despawn("rover_model", world)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  좌표 변환기
@@ -1433,11 +1483,20 @@ class UWBApp:
         self._rover_drive_active = True
         self._rover_paused       = False
         self._rover_pause_evt.set()
+        # Gazebo에 로버 스폰
+        n0, e0 = self.path_start
+        threading.Thread(target=GazeboMonitor.spawn_rover,
+                         args=(n0, e0, CFG["gz_world"]),
+                         daemon=True).start()
         threading.Thread(target=self._rover_drive_loop, daemon=True).start()
 
     def _stop_rover_drive(self):
         self._rover_drive_active = False
         self._rover_pause_evt.set()   # 대기 중이면 unblock
+        # Gazebo에서 로버 제거
+        threading.Thread(target=GazeboMonitor.despawn_rover,
+                         args=(CFG["gz_world"],),
+                         daemon=True).start()
 
     def _pause_rover(self):
         """from_depot 픽업 시 로버 일시정지."""
@@ -1458,9 +1517,11 @@ class UWBApp:
         path_len = math.hypot(n1 - n0, e1 - e0)
         if path_len < 0.01:
             return
-        speed = CFG["rover_speed"]
-        dt    = 0.05
-        t     = self.rover_t
+        speed       = CFG["rover_speed"]
+        dt          = 0.05
+        t           = self.rover_t
+        last_gz     = 0.0          # 마지막 Gazebo pose 갱신 시각
+        gz_interval = 0.5          # 2Hz
         while self._rover_drive_active and not self._stop_evt.is_set():
             # 일시정지 대기 (0.1s 단위로 stop 체크)
             if not self._rover_pause_evt.wait(timeout=0.1):
@@ -1472,6 +1533,14 @@ class UWBApp:
                 break
             t = min(1.0, t + (speed * dt) / path_len)
             self.root.after(0, lambda tt=t: self._update_rover_pos(tt))
+            # Gazebo 로버 위치 갱신 (2Hz, subprocess 부담 줄이기)
+            now = time.monotonic()
+            if now - last_gz >= gz_interval and self.rover_pos:
+                last_gz = now
+                rn, re  = self.rover_pos
+                threading.Thread(target=GazeboMonitor.move_rover,
+                                 args=(rn, re, CFG["gz_world"]),
+                                 daemon=True).start()
             time.sleep(dt)
 
     def _sim_descend_ascend(self, n, e, flight_alt, drop_alt, on_grab=None):

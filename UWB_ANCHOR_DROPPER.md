@@ -182,7 +182,7 @@ drone/
 ```
 uwb_anchor_dropper_sitl.py
 │
-├── GazeboMonitor          — Gazebo 폴링 / spawn / despawn
+├── GazeboMonitor          — Gazebo 폴링 / spawn / despawn / 로버 pose 갱신
 ├── CoordMapper            — 픽셀 ↔ NED 좌표 변환
 ├── _zigzag_candidates()   — 지그재그 후보점 생성 (순수 함수)
 ├── smart_place_anchors()  — 배제 필터링 (순수 함수)
@@ -198,6 +198,8 @@ uwb_anchor_dropper_sitl.py
     ├── _mission_coro              — 실 MAVSDK 비동기 코루틴
     ├── _real_fly_pick/drop        — REAL/SITL 비행 헬퍼
     ├── _cam_align                 — 카메라 기반 앵커 위치 정렬
+    ├── _start/stop/pause/resume_rover_drive — 로버 자율 주행 제어
+    ├── _rover_drive_loop          — 경로 이동 루프 + Gazebo pose 2Hz 갱신
     ├── _open_cam_window           — 독립 카메라 팝업 창
     └── _cam_refresh               — 패널 소형 카메라 뷰 갱신 (15fps)
 
@@ -245,6 +247,29 @@ camera_detector.py
 ---
 
 ## 수정 이력 (Changelog)
+
+### 2026-04-14 — 로버 자율 주행 + Gazebo 3D 모델
+
+1. **로버 자율 주행 구현** (`_rover_drive_loop`)
+   - `rover_speed` m/s(기본 0.5)로 경로 시작→끝 자율 이동 (50ms 틱)
+   - `from_depot` 픽업 시 `_pause_rover()` → 로버 정지, 실제 위치에서 픽업
+   - 픽업 완료 후 `_resume_rover()` → 재개. `relocate`/`skip` 중엔 계속 주행
+   - 맵에 정지 상태 표시 (⏸ + 오렌지 테두리)
+
+2. **Gazebo 로버 3D 모델** (`GazeboMonitor.spawn_rover / move_rover / despawn_rover`)
+   - 미션 시작 시 오렌지색 박스 모델(`rover_model`) 경로 시작점에 스폰
+   - `_rover_drive_loop` 내 2Hz로 `set_pose` 서비스 호출 → 실시간 위치 갱신
+   - 미션 종료/중단 시 자동 despawn
+
+3. **버그픽스: vision z 부호 반전** (`_vision_inject_task`)
+   - `float(-z)` → `float(z)`: NED z를 그대로 전달해야 함
+   - 기존 코드는 드론을 지하로 보고 → PX4가 급상승 명령
+
+4. **버그픽스: GazeboMonitor 스레드 타이밍**
+   - `gz_monitor.start()` → `root.after(100, gz_monitor.start)`
+   - mainloop 전 background thread에서 `root.after()` 호출 시 RuntimeError 방지
+
+---
 
 ### 2026-04-09 — VisionPositionInjector 제거 및 코드 정리
 
