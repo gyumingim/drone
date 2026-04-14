@@ -1871,6 +1871,7 @@ class UWBApp:
             # 근거: GPS 유지 시 arming check가 계속 실패함 (구버전 동작 패턴 복원)
             try:
                 await drone.param.set_param_int("NAV_RCL_ACT", 0)
+                await drone.param.set_param_int("NAV_DLL_ACT", 0)   # GCS 연결 필수 해제
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
                 await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
