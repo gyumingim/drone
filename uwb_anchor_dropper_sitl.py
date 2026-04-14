@@ -378,8 +378,9 @@ class GazeboMonitor:
     # ── 물리 페이로드 (UWB 앵커 픽업/드롭 시뮬) ──────────────────────────────
 
     @staticmethod
-    def spawn_payload(world: str = "default"):
-        """물리 UWB 페이로드 모델 스폰 (파킹 위치 z=-10, 비정적)."""
+    def spawn_payload(world: str = "default",
+                      n: float = 0.0, e: float = 0.0, z: float = 0.175):
+        """물리 UWB 페이로드 모델 스폰. 지정 위치(NED→Gz ENU)에 생성."""
         sdf_xml = (
             '<?xml version="1.0"?><sdf version="1.7">'
             '<model name="uwb_payload">'
@@ -407,8 +408,9 @@ class GazeboMonitor:
             '</model></sdf>'
         )
         sdf_esc = sdf_xml.replace('"', '\\"')
+        # Gz ENU: x=East, y=North
         req = (f'sdf: "{sdf_esc}" '
-               f'pose {{ position {{ x: 0.0 y: 0.0 z: -10.0 }} }} '
+               f'pose {{ position {{ x: {e:.4f} y: {n:.4f} z: {z:.4f} }} }} '
                f'name: "uwb_payload"')
         try:
             subprocess.run(
@@ -1906,10 +1908,13 @@ class UWBApp:
             on_grab()
         # ── 물리 픽업 (SITL) ──────────────────────────────────────────────
         if MODE == "SITL":
-            # 1) 페이로드를 앵커 위치로 순간이동 (집기 직전 위치 맞추기)
-            GazeboMonitor.set_payload_pose(
-                dest_n, dest_e, 0.175, CFG["gz_world"])
+            # 0) 혹시 이전 사이클 페이로드 잔여 제거 (이름 충돌 방지)
+            GazeboMonitor.despawn_payload(CFG["gz_world"])
             await asyncio.sleep(0.3)
+            # 1) 픽업 위치에 페이로드 스폰 (그리퍼 바로 아래, ~0.175m 높이)
+            GazeboMonitor.spawn_payload(
+                CFG["gz_world"], dest_n, dest_e, 0.175)
+            await asyncio.sleep(0.5)  # 스폰 완료 대기
             # 2) 원본 앵커 모델 제거
             if anchor_name:
                 GazeboMonitor.despawn(anchor_name, CFG["gz_world"])
@@ -1961,8 +1966,8 @@ class UWBApp:
             if final and abs(final[0] - dest_n) < 1.5:
                 dest_n, dest_e = final[0], final[1]
                 self._log(f"  📍 낙하위치: N={dest_n:.2f} E={dest_e:.2f}")
-            # 4) 페이로드 파킹 (다음 픽업 재사용)
-            threading.Thread(target=GazeboMonitor.park_payload,
+            # 4) 페이로드 제거 (다음 픽업 때 새로 스폰)
+            threading.Thread(target=GazeboMonitor.despawn_payload,
                              args=(CFG["gz_world"],), daemon=True).start()
         # ─────────────────────────────────────────────────────────────────
         try:
@@ -2097,12 +2102,6 @@ class UWBApp:
             await drone.offboard.start()
             self._log("  이륙...")
             await asyncio.sleep(CFG["takeoff_wait"])
-
-            # 물리 페이로드 스폰 (SITL) — 이륙 완료 후 파킹 위치에 생성
-            if MODE == "SITL":
-                threading.Thread(target=GazeboMonitor.spawn_payload,
-                                 args=(CFG["gz_world"],), daemon=True).start()
-                self._log("  📦 물리 페이로드 스폰 (z=-10 파킹)")
 
             # 이륙 완료 위치 확인 (좌표계 디버그)
             try:
