@@ -1867,34 +1867,32 @@ class UWBApp:
                 if s.is_connected:
                     self._log("  ✅ 연결됨"); break
 
-            # PX4 파라미터: GPS-denied + UWB vision 위치 소스
+            # PX4 파라미터 설정
+            # SITL: Gazebo GPS 그대로 사용 — EKF2 파라미터 건드리지 않음
+            #        (GPS 끄면 UWB vision 수렴 전에 EKF2 unhealthy → arming 거부)
+            # REAL: GPS-denied → vision-only 모드로 전환
             try:
                 await drone.param.set_param_int("NAV_RCL_ACT", 0)
                 await drone.param.set_param_int("COM_RCL_EXCEPT", 4)
-                # GPS 없이 arm 허용
-                await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-                # vision 수신 지연 보정 (pymavlink UDP 지연)
-                await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
-                # vision 최소 품질 기준 완화 (covariance 허용 범위)
-                await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
 
-                # PX4 v1.14+ 신API: EKF2_AID_MASK → EKF2_EV_CTRL + EKF2_GPS_CTRL
-                # 구버전(v1.13 이하)은 EKF2_AID_MASK 사용
-                # 참고: https://github.com/PX4/PX4-Autopilot/issues/17969
-                try:
-                    # v1.14+: EKF2_EV_CTRL bit0=수평위치 bit1=수직위치
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)
-                    # GPS 융합 완전 비활성화
-                    await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
-                    # 고도 기준: 3=EV(vision), GPS 없는 환경에서 EKF Z 안정화
-                    await drone.param.set_param_int("EKF2_HGT_REF", 3)
-                    self._log("  ✅ PX4 v1.14+ API: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=3")
-                except Exception:
-                    # v1.13 이하 fallback
-                    await drone.param.set_param_int("EKF2_AID_MASK", 8)
-                    await drone.param.set_param_int("NAV_GNSS_MASK", 0)
-                    self._log("  ✅ PX4 v1.13 API: EKF2_AID_MASK=8, NAV_GNSS_MASK=0")
-                self._log("  ✅ 파라미터: GPS off, vision only, ARM_WO_GPS=1")
+                if MODE == "REAL":
+                    # GPS 없이 arm 허용
+                    await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
+                    # vision 수신 지연 보정
+                    await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
+                    await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
+                    try:
+                        await drone.param.set_param_int("EKF2_EV_CTRL", 3)
+                        await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
+                        await drone.param.set_param_int("EKF2_HGT_REF", 3)
+                        self._log("  ✅ REAL: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=3")
+                    except Exception:
+                        await drone.param.set_param_int("EKF2_AID_MASK", 8)
+                        await drone.param.set_param_int("NAV_GNSS_MASK", 0)
+                        self._log("  ✅ REAL(v1.13): EKF2_AID_MASK=8, NAV_GNSS_MASK=0")
+                else:
+                    # SITL: GPS 유지, vision은 UWB 측위 모니터링용으로만 주입
+                    self._log("  SITL: GPS 유지 (EKF2 파라미터 기본값 사용)")
             except Exception as pe:
                 self._log(f"  ⚠ 파라미터 설정 실패: {pe}")
 
@@ -1905,19 +1903,21 @@ class UWBApp:
             vision_task = asyncio.create_task(self._vision_inject_task(drone))
             self._log(f"  🔭 Vision 주입 시작: MAVSDK mocap  {CFG['vision_rate_hz']}Hz")
 
-            # EKF2_EV_CTRL 변경 후 vision 메시지가 PX4에 도달 + EKF 수렴 대기
-            self._log("  UWB vision 수렴 대기 (3s)...")
-            await asyncio.sleep(3.0)
+            if MODE == "REAL":
+                # REAL: vision-only → EKF 수렴 대기 필요
+                self._log("  UWB vision 수렴 대기 (3s)...")
+                await asyncio.sleep(3.0)
 
-            # is_local_position_ok 타임아웃 (Vision 없으면 무한 대기 방지)
+            # 로컬 포지션 준비 대기 (SITL=GPS 기반으로 즉시, REAL=vision 수렴 후)
             self._log("  로컬 포지션 대기...")
             t_health = asyncio.get_running_loop().time()
+            timeout  = 5.0 if MODE == "SITL" else 20.0
             async for h in drone.telemetry.health():
                 if h.is_local_position_ok:
-                    self._log("  ✅ 로컬 포지션 OK (UWB vision 수신됨)"); break
-                if asyncio.get_running_loop().time() - t_health > 15.0:
-                    self._log("  ⚠ 로컬 포지션 타임아웃 — vision 미수신"
-                              " (UWB 연결 및 EKF2_EV_CTRL 확인 필요)")
+                    self._log("  ✅ 로컬 포지션 OK"); break
+                if asyncio.get_running_loop().time() - t_health > timeout:
+                    self._log(f"  ⚠ 로컬 포지션 타임아웃 ({timeout:.0f}s)"
+                              + (" — UWB 연결/EKF2_EV_CTRL 확인 필요" if MODE == "REAL" else ""))
                     break
 
             await drone.action.arm()
