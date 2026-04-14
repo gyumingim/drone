@@ -77,6 +77,7 @@ except ImportError:
         def start(self): pass
         def stop(self): pass
         def get_position(self, max_age=2.0): return None
+        def get_velocity(self): return (0., 0., 0.)
         def get_distances(self): return {}
         def get_quality(self): return {
             "sigma"        : (999, 999, 999),
@@ -92,8 +93,10 @@ except ImportError:
         def update_camera_fix(self, n, e, sigma_h=0.15): pass
 
 from mavsdk.mocap import (VisionPositionEstimate as _VPE,
+                          VisionSpeedEstimate as _VSE,
                           PositionBody as _PosBody,
                           AngleBody as _AngBody,
+                          SpeedNed as _SpeedNed,
                           Covariance as _Cov)
 
 
@@ -1848,8 +1851,7 @@ class UWBApp:
                 if pos:
                     n, e, z    = pos
                     sn, se, sz = self.uwb.get_quality()["sigma"]
-                    # 21-element upper triangular covariance (NED 위치 3×3, 자세 3×3)
-                    # 자세는 UWB로 알 수 없음 → 1.0 rad 보수적
+                    # 위치 covariance (NED 위치 3×3, 자세 3×3 upper triangular 21개)
                     cov = [sn**2, NAN, NAN, NAN, NAN, NAN,
                                   se**2, NAN, NAN, NAN, NAN,
                                         sz**2, NAN, NAN, NAN,
@@ -1859,12 +1861,35 @@ class UWBApp:
                     try:
                         await drone.mocap.set_vision_position_estimate(
                             _VPE(
-                                time_usec     = 0,  # 0 → PX4가 수신 시각 사용 (클럭 불일치 방지)
+                                time_usec     = 0,
                                 position_body = _PosBody(float(n), float(e), float(z)),
                                 angle_body    = _AngBody(0., 0., 0.),
                                 pose_covariance = _Cov(cov),
                             )
                         )
+                    except Exception:
+                        pass
+
+                    # 속도 주입 — EKF2_EV_CTRL bit2=velocity 활성화 필요
+                    # UWB EKF 속도 상태 x[3..5] = (vn, ve, vd)
+                    # 이유: 속도 없으면 EKF2가 IMU dead-reckoning으로만 속도 추정 →
+                    #       MPC 컨트롤러 오버슈트 원인
+                    try:
+                        vel_tuple = self.uwb.get_quality().get("velocity")
+                        if vel_tuple:
+                            vn, ve, vd = vel_tuple
+                            sv = max(sn, se) * 2.0   # 속도 sigma ≈ 위치 sigma × 2
+                            vel_cov = [sv**2, NAN, NAN,
+                                              sv**2, NAN,
+                                                     (sz * 2.0)**2]
+                            await drone.mocap.set_vision_speed_estimate(
+                                _VSE(
+                                    time_usec        = 0,
+                                    speed_ned        = _SpeedNed(
+                                        float(vn), float(ve), float(vd)),
+                                    speed_covariance = _Cov(vel_cov),
+                                )
+                            )
                     except Exception:
                         pass
                 await asyncio.sleep(max(0., period - (time.monotonic() - t0)))
@@ -1894,10 +1919,10 @@ class UWBApp:
                 await drone.param.set_param_float("EKF2_EV_DELAY", 25.0)
                 await drone.param.set_param_float("EKF2_EVP_NOISE", 0.1)
                 try:
-                    await drone.param.set_param_int("EKF2_EV_CTRL", 3)
+                    await drone.param.set_param_int("EKF2_EV_CTRL", 7)   # bit0=horiz, bit1=vert, bit2=vel
                     await drone.param.set_param_int("EKF2_GPS_CTRL", 0)
                     await drone.param.set_param_int("EKF2_HGT_REF", 3)
-                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=3, GPS_CTRL=0, HGT_REF=3(EV)")
+                    self._log("  ✅ 파라미터: EKF2_EV_CTRL=7(pos+vel), GPS_CTRL=0, HGT_REF=3(EV)")
                 except Exception:
                     await drone.param.set_param_int("EKF2_AID_MASK", 8)
                     await drone.param.set_param_int("NAV_GNSS_MASK", 0)
