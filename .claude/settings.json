@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gz topic:*)",
+      "Read(//usr/lib/python3/dist-packages/gz/msgs10/**)",
+      "Bash(git commit -m ':*)",
+      "WebFetch(domain:gazebosim.org)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/gazebosim/gz-transport/gz-transport13/python/examples/subscriber.py\")",
+      "Bash(make -C ~/PX4-Autopilot px4_sitl list_vmd_make_targets)",
+      "Bash(make px4_sitl gz_x500_cam)",
+      "Bash(protoc --version)",
+      "Bash(dpkg -l libprotobuf-dev)",
+      "Bash(pip3 show:*)",
+      "Bash(pip3 uninstall:*)",
+      "Bash(pip3 install:*)",
+      "Bash(pkill -f \"px4\")",
+      "Bash(pkill -f \"gz sim\")",
+      "Bash(bash -c 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate base && which python3 && python3 -c \"import gz.transport13; print\\(gz.transport13.__file__\\)\" 2>&1')",
+      "Bash(bash -c 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate base && timeout 3 python3 uwb_anchor_dropper_sitl.py 2>&1')",
+      "Bash(timeout 4 /usr/bin/python3 uwb_anchor_dropper_sitl.py)",
+      "Bash(bash -c 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate base && env | grep -E \"PYTHONPATH|PYTHONHOME|LD_LIBRARY_PATH\" | head -10')",
+      "Bash(gz model:*)",
+      "Bash(echo \"returncode: $?\")",
+      "Bash(echo \"rc: $?\" echo \"---\" gz topic -l)",
+      "Bash(echo \"rc: $?\")",
+      "WebFetch(domain:www.qorvo.com)",
+      "WebFetch(domain:download.mikroe.com)",
+      "WebFetch(domain:www.mouser.com)",
+      "WebFetch(domain:docs.leapslabs.com)",
+      "WebFetch(domain:forum.qorvo.com)",
+      "WebFetch(domain:www.symmetryelectronics.com)",
+      "WebFetch(domain:www.e-kom.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:discuss.px4.io)",
+      "WebFetch(domain:answers.gazebosim.org)",
+      "Bash(sed -n '455,470p' /home/karma/drone/uwb_anchor_dropper_sitl.py)",
+      "Bash(sed -n '630,650p' /home/karma/drone/uwb_anchor_dropper_sitl.py)",
+      "Bash(sed -n '678,720p' /home/karma/drone/uwb_anchor_dropper_sitl.py)",
+      "Bash(sed -n '455,468p' /home/karma/drone/uwb_anchor_dropper_sitl.py)",
+      "Bash(sed -n '630,645p' /home/karma/drone/uwb_anchor_dropper_sitl.py)",
+      "Bash(sed -n '678,718p' /home/karma/drone/uwb_anchor_dropper_sitl.py)"
+    ],
+    "additionalDirectories": [
+      "/home/karma/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes",
+      "/home/karma/PX4-Autopilot/build/px4_sitl_default"
+    ]
+  }
+}
