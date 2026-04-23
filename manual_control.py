@@ -91,45 +91,64 @@ def connect(port=FC_PORT, baud=FC_BAUD):
     raise RuntimeError("FC not found on any ACM port")
 
 
-def ensure_fresh_ekf(port=FC_PORT, baud=FC_BAUD):
-    """Connect, ensure EK3_SRC1_POSZ=6, reboot if param wrong or baro drifted."""
-    conn = connect(port, baud)
+def ensure_fresh_ekf(conn, port=FC_PORT, baud=FC_BAUD):
+    """Ensure EK3_SRC1_POSZ=6 (ExternalNav z) and EKF z ≈ 0. Reboots if needed."""
+    # enable position stream so LOCAL_POSITION_NED arrives
+    conn.mav.request_data_stream_send(
+        conn.target_system, conn.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1,
+    )
+    time.sleep(0.3)
 
     # read EK3_SRC1_POSZ
     conn.mav.param_request_read_send(
-        conn.target_system, conn.target_component, b'EK3_SRC1_POSZ', -1)
-    p = conn.recv_match(type='PARAM_VALUE', blocking=True, timeout=5)
-    posz = int(p.param_value) if p else -1
-    print(f"[INIT] EK3_SRC1_POSZ = {posz}")
-
-    # read current baro z
-    conn.mav.request_data_stream_send(
         conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1)
-    pos = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=3)
-    z = pos.z if pos else 0.0
-    print(f"[INIT] LOCAL_NED z = {z:.2f}m")
+        'EK3_SRC1_POSZ', -1,
+    )
+    posz = None
+    dl = time.time() + 5.0
+    while time.time() < dl:
+        m = conn.recv_match(type='PARAM_VALUE', blocking=True, timeout=1.0)
+        if m and m.param_id.rstrip('\x00') == 'EK3_SRC1_POSZ':
+            posz = int(m.param_value)
+            flog(f"EK3_SRC1_POSZ = {posz}")
+            break
+    if posz is None:
+        flog("EK3_SRC1_POSZ: read timeout")
 
-    needs_reboot = (posz != 6) or (abs(z) > 2.0)
+    need_reboot = False
+    if posz != 6:
+        flog(f"EK3_SRC1_POSZ={posz} → setting 6 (ExternalNav z, UWB)")
+        conn.mav.param_set_send(
+            conn.target_system, conn.target_component,
+            'EK3_SRC1_POSZ', 6.0,
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+        )
+        time.sleep(0.3)
+        need_reboot = True
 
-    if needs_reboot:
-        if posz != 6:
-            print(f"[INIT] Setting EK3_SRC1_POSZ 6...")
-            conn.mav.param_set_send(
-                conn.target_system, conn.target_component,
-                b'EK3_SRC1_POSZ', 6.0,
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-            time.sleep(1.0)
-        print(f"[INIT] Rebooting FC (posz={posz}, z={z:.1f}m)...")
+    # check EKF z drift — if large, reboot so EKF starts fresh at z≈0
+    pos = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=3.0)
+    if pos:
+        flog(f"EKF z = {pos.z:.2f}m")
+        if abs(pos.z) > 2.0:
+            flog(f"  z={pos.z:.2f}m > 2m — baro drift detected, reboot needed")
+            need_reboot = True
+    else:
+        flog("LOCAL_POSITION_NED: read timeout")
+
+    if need_reboot:
+        flog("Rebooting FC via MAVLink...")
         conn.mav.command_long_send(
             conn.target_system, conn.target_component,
             mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-            0, 1, 0, 0, 0, 0, 0, 0)
-        time.sleep(14)
+            0, 1, 0, 0, 0, 0, 0, 0,
+        )
+        flog("Waiting 10s for FC to restart...")
+        time.sleep(10.0)
+        flog("Reconnecting after reboot...")
         conn = connect(port, baud)
-        print("[INIT] FC reboot complete")
-    else:
-        print(f"[INIT] EK3_SRC1_POSZ=6 OK, z={z:.2f}m — no reboot needed")
+        flog("Reconnected — EKF should now start from z=0")
 
     return conn
 
@@ -148,11 +167,10 @@ def send_global_origin(conn, lat=0.0, lon=0.0, alt=0.0):
 def request_streams(conn):
     """Ask ArduPilot to send EKF, position, attitude, servo streams."""
     streams = [
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,      # EKF_STATUS_REPORT
-        mavutil.mavlink.MAV_DATA_STREAM_POSITION,    # LOCAL_POSITION_NED
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,      # ATTITUDE
+        mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,    # EKF_STATUS_REPORT
+        mavutil.mavlink.MAV_DATA_STREAM_POSITION,   # LOCAL_POSITION_NED
+        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,     # ATTITUDE
         mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, # SERVO_OUTPUT_RAW
-        mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, # SCALED_PRESSURE
     ]
     for s in streams:
         conn.mav.request_data_stream_send(
@@ -162,47 +180,12 @@ def request_streams(conn):
     flog("Streams requested")
 
 
-_baro_ref = None  # hPa, reference pressure at ground (set by calibrate_baro)
-
-
-def _press_to_alt(hpa):
-    """ISA standard atmosphere: pressure (hPa) → absolute altitude (m)."""
-    return 44307.69 * (1.0 - (hpa / 1013.25) ** 0.190284)
-
-
-def baro_rel_alt(conn):
-    """Baro altitude above ground reference, positive = up (m). None if not calibrated."""
-    sp = getattr(conn, 'messages', {}).get('SCALED_PRESSURE')
-    if sp is None or _baro_ref is None:
-        return None
-    return _press_to_alt(sp.press_abs) - _press_to_alt(_baro_ref)
-
-
-def calibrate_baro(conn, samples=20, timeout=15):
-    """Average N SCALED_PRESSURE readings → store as ground reference."""
-    global _baro_ref
-    flog("Calibrating baro reference...")
-    readings = []
-    deadline = time.time() + timeout
-    while len(readings) < samples and time.time() < deadline:
-        msg = conn.recv_match(type='SCALED_PRESSURE', blocking=True, timeout=1.0)
-        if msg:
-            readings.append(msg.press_abs)
-    if not readings:
-        flog("Baro calibration FAILED — no SCALED_PRESSURE")
-        return False
-    _baro_ref = sum(readings) / len(readings)
-    flog(f"Baro ref: {_baro_ref:.2f} hPa ({len(readings)} samples) → z=0")
-    return True
-
-
 _EKF_ATT      = 0x001   # attitude
 _EKF_VEL_H    = 0x002   # horiz velocity
 _EKF_POS_REL  = 0x008   # horiz pos (relative)
 _EKF_POS_ABS  = 0x010   # horiz pos (absolute)
 _EKF_CONST    = 0x080   # constant-position mode (no horiz pos)
 _EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
-
 
 
 def wait_ready(conn, timeout=15):
@@ -424,7 +407,7 @@ def takeoff(conn, alt=TAKEOFF_ALT):
                     f"Takeoff complete: z={msg.z:.2f}m  "
                     f"Δ={delta:.2f}m from start"
                 )
-                return (msg.x, msg.y, msg.z)
+                return msg.z
 
     flog("TAKEOFF TIMEOUT — drone may not have moved")
     return None
@@ -442,79 +425,58 @@ def land(conn):
 
 def debug_status(conn, uwb, duration=15):
     """Print live debug for EKF, UWB, and position for `duration` seconds."""
-    msgs = getattr(conn, 'messages', {})
-    print("\n" + "="*60)
+    print("\n" + "="*55)
     print(f"DEBUG MODE — watching for {duration}s")
-    print("="*60)
+    print("="*55)
     deadline = time.time() + duration
     while time.time() < deadline:
-        # drain pending messages into conn.messages
-        for _ in range(20):
-            if conn.recv_match(blocking=False) is None:
-                break
-
-        ekf  = msgs.get('EKF_STATUS_REPORT')
-        pos  = msgs.get('LOCAL_POSITION_NED')
-        srv  = msgs.get('SERVO_OUTPUT_RAW')
-        hb   = msgs.get('HEARTBEAT')
+        ekf = conn.recv_match(
+            type='EKF_STATUS_REPORT', blocking=False
+        )
+        pos = conn.recv_match(
+            type='LOCAL_POSITION_NED', blocking=False
+        )
         drone_pos = uwb.get_drone_pos()
         tags = uwb.get_tags()
+        uwb_ok = drone_pos is not None
         vision_sent = getattr(uwb, '_dbg_cnt', 0)
 
-        # ── armed / mode ─────────────────────────────────────────
-        if hb:
-            armed = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-            print(f"  Armed: {'ARMED  ' if armed else 'disarmed'}  mode={hb.custom_mode}")
-
-        # ── UWB ──────────────────────────────────────────────────
-        uwb_ok = drone_pos is not None
-        print(f"  UWB:  {'OK' if uwb_ok else 'NO DATA':7s}  tags={len(tags)}"
-              f"  vision_sent={vision_sent:4d}")
+        print(
+            f"  UWB: {'OK' if uwb_ok else 'NO DATA':7s}"
+            f"  tags={len(tags)}"
+            f"  vision_sent={vision_sent:4d}"
+        )
         if drone_pos:
-            print(f"  UWB pos:   x={drone_pos[0]:+.3f}  y={drone_pos[1]:+.3f}"
-                  f"  z={drone_pos[2]:+.3f}")
-
-        # ── baro ─────────────────────────────────────────────────
-        sp = msgs.get('SCALED_PRESSURE')
-        if sp:
-            baro_alt = baro_rel_alt(conn)
-            baro_str = (f"{baro_alt:+.3f}m  VISION_z={-baro_alt:+.3f}m"
-                        if baro_alt is not None else "not calibrated")
-            print(f"  Baro:      {sp.press_abs:.2f} hPa  rel={baro_str}")
-        else:
-            print("  Baro:      no SCALED_PRESSURE")
-
-        # ── EKF ──────────────────────────────────────────────────
+            print(
+                f"  UWB pos: x={drone_pos[0]:.2f}"
+                f"  y={drone_pos[1]:.2f}"
+                f"  z={drone_pos[2]:.2f}"
+            )
         if ekf:
             b = ekf.flags
-            print(f"  EKF:       flags={b:#06x}"
-                  f"  att={bool(b&_EKF_ATT)}"
-                  f"  vel={bool(b&_EKF_VEL_H)}"
-                  f"  pos_rel={bool(b&_EKF_POS_REL)}"
-                  f"  pos_abs={bool(b&_EKF_POS_ABS)}"
-                  f"  const={bool(b&_EKF_CONST)}")
-
-        # ── LOCAL_NED ─────────────────────────────────────────────
+            print(
+                f"  EKF flags={b:#06x}"
+                f"  att={bool(b&_EKF_ATT)}"
+                f"  vel={bool(b&_EKF_VEL_H)}"
+                f"  pos_rel={bool(b&_EKF_POS_REL)}"
+                f"  pos_abs={bool(b&_EKF_POS_ABS)}"
+                f"  const={bool(b&_EKF_CONST)}"
+            )
         if pos:
-            drift = "  ← BARO DRIFT!" if abs(pos.z) > 1.0 else ""
-            print(f"  LOCAL_NED: x={pos.x:+.3f}  y={pos.y:+.3f}"
-                  f"  z={pos.z:+.3f}{drift}")
-
-        # ── SERVO ─────────────────────────────────────────────────
-        if srv:
-            s = (srv.servo1_raw, srv.servo2_raw, srv.servo3_raw, srv.servo4_raw)
-            on = any(v > 1050 for v in s)
-            print(f"  SERVO:     {s[0]:4d} {s[1]:4d} {s[2]:4d} {s[3]:4d}"
-                  f"  {'MOTORS ON' if on else 'motors off'}")
-
-        # ── drift ─────────────────────────────────────────────────
+            print(
+                f"  LOCAL_NED: x={pos.x:.2f}"
+                f"  y={pos.y:.2f}"
+                f"  z={pos.z:.2f}"
+            )
         if pos and drone_pos:
             dx = drone_pos[0] - pos.x
             dy = drone_pos[1] - pos.y
             dz = drone_pos[2] - pos.z
-            print(f"  DRIFT:     Δx={dx:+.3f}  Δy={dy:+.3f}  Δz={dz:+.3f}")
-
-        print("-"*60)
+            print(
+                f"  DRIFT  Δx={dx:+.3f}  Δy={dy:+.3f}  Δz={dz:+.3f}"
+                f"  (UWB - EKF, 작을수록 정렬됨)"
+            )
+        print("-"*55)
         time.sleep(1.0)
 
 
@@ -546,7 +508,6 @@ def _flight(conn, uwb):
         else:
             flog("UWB origin timeout — proceeding anyway")
 
-        calibrate_baro(conn)
         debug_status(conn, uwb, duration=15)
 
         wait_ready(conn)
@@ -557,14 +518,13 @@ def _flight(conn, uwb):
             flog("[FLIGHT] ARM failed — aborting")
             return
         time.sleep(0.5)
-        result = takeoff(conn, TAKEOFF_ALT)
-        if result is None:
+        hover_z = takeoff(conn, TAKEOFF_ALT)
+        if hover_z is None:
             flog("[FLIGHT] Takeoff failed — aborting")
             return
-        hover_x, hover_y, hover_z = result
-        flog(f"Hovering 2s at ({hover_x:.2f},{hover_y:.2f},{hover_z:.2f})...")
+        flog(f"Hovering 2s at z={hover_z:.2f}m...")
         _tset(phase='hover')
-        held = hold(conn, hover_x, hover_y, hover_z, 2.0, uwb=uwb)
+        held = hold(conn, 0, 0, hover_z, 2.0, uwb=uwb)
         if held:
             land(conn)
         flog("Done")
@@ -809,8 +769,9 @@ def _heartbeat_loop(conn, stop_evt):
 
 
 def main():
-    conn = ensure_fresh_ekf()
-    uwb = UWBTag(conn, baro_getter=lambda: baro_rel_alt(conn))
+    conn = connect()
+    conn = ensure_fresh_ekf(conn)
+    uwb = UWBTag(conn)
     uwb.start()
 
     stop_hb = threading.Event()
