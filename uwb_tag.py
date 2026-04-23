@@ -155,6 +155,7 @@ class UWBTag:
         self._stop   = threading.Event()
         self._thread = None
 
+        self.z_offset  = 0.0       # added to VISION z — ramp to cancel baro drift
         self._origin   = None      # (x, y, z) at first fix
         self._pos_rel  = None      # (dx, dy, dz) relative to origin
         self._pos_abs  = None      # (x, y, z) absolute UWB frame
@@ -204,6 +205,7 @@ class UWBTag:
     def _inject_vision(self, x, y, z):
         if self.conn is None:
             return
+        z = z + self.z_offset
         # covariance: upper-triangle of 6x6 (pos x,y,z + rot r,p,y)
         # indices 0,6,11 = position variances; 15,18,20 = angle variances
         cov = [0.0] * 21

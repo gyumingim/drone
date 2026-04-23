@@ -126,31 +126,55 @@ _EKF_CONST    = 0x080   # constant-position mode (no horiz pos)
 _EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
 
 
-def wait_ekf_z_stable(conn, threshold=0.5, timeout=90):
-    """ARM 전에 EKF z가 baro drift에서 0으로 수렴할 때까지 대기.
+def wait_ekf_z_stable(conn, uwb, threshold=0.5, ramp_rate=0.3, timeout=90):
+    """VISION z offset을 EKF z에서 0으로 서서히 걸어서 baro drift 상쇄.
 
-    UWB VISION_POSITION_ESTIMATE가 z≈0을 주입하면 EKF z가 서서히 수렴함.
-    |z| < threshold 가 되면 NAV_TAKEOFF alt=1.0m이 정상 동작함.
+    EKF z = -16m이면 innovation gate가 UWB z=0을 거부함.
+    offset을 -16m에서 시작해 0.3m/s로 0을 향해 ramp하면 EKF가 따라옴.
     """
-    flog(f"Waiting for EKF z to converge (|z| < {threshold}m)...")
+    # 현재 EKF z 읽기
+    ekf_z = None
+    for _ in range(10):
+        m = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1.0)
+        if m:
+            ekf_z = m.z
+            break
+    if ekf_z is None:
+        flog("EKF z ramp: no LOCAL_NED — skipping")
+        return False
+
+    if abs(ekf_z) < threshold:
+        flog(f"EKF z already stable: z={ekf_z:.3f}m — skipping ramp")
+        return True
+
+    flog(f"EKF z ramp: start={ekf_z:.2f}m → 0  rate={ramp_rate}m/s")
+    uwb.z_offset = ekf_z   # VISION z = UWB_real_z + offset ≈ EKF z (near)
     last_log = 0.0
     deadline = time.time() + timeout
+    dt = 0.1  # 100ms step
+
     while time.time() < deadline:
-        msg = conn.recv_match(
-            type='LOCAL_POSITION_NED', blocking=True, timeout=1.0
-        )
-        if msg is None:
-            continue
-        z = msg.z
-        _tset(ned_x=msg.x, ned_y=msg.y, ned_z=z)
-        now = time.time()
-        if now - last_log > 3.0:
-            flog(f"  EKF z={z:.3f}m  (need |z| < {threshold}m)")
-            last_log = now
-        if abs(z) < threshold:
-            flog(f"EKF z stable: z={z:.3f}m  baro drift cancelled")
-            return True
-    flog(f"EKF z timeout — z={msg.z:.3f}m still drifted, proceeding anyway")
+        # ramp offset toward 0
+        if uwb.z_offset > 0:
+            uwb.z_offset = max(0.0, uwb.z_offset - ramp_rate * dt)
+        else:
+            uwb.z_offset = min(0.0, uwb.z_offset + ramp_rate * dt)
+
+        m = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=0.2)
+        if m:
+            _tset(ned_x=m.x, ned_y=m.y, ned_z=m.z)
+            now = time.time()
+            if now - last_log > 2.0:
+                flog(f"  EKF z={m.z:.3f}m  offset={uwb.z_offset:.3f}m")
+                last_log = now
+            if abs(m.z) < threshold:
+                uwb.z_offset = 0.0
+                flog(f"EKF z stable: z={m.z:.3f}m  offset cancelled")
+                return True
+        time.sleep(dt)
+
+    uwb.z_offset = 0.0
+    flog(f"EKF z ramp timeout — proceeding anyway")
     return False
 
 
@@ -480,7 +504,7 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
-        wait_ekf_z_stable(conn)
+        wait_ekf_z_stable(conn, uwb)
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
