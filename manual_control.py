@@ -53,6 +53,28 @@ def flog(msg: str) -> None:
             del _flight_log[0]
 
 
+# ── FC telemetry (updated by flight thread, read by viz thread) ───────────────
+
+_telem: dict = {
+    'phase': 'init',
+    'armed': None,
+    'mode': None,
+    'ned_x': None, 'ned_y': None, 'ned_z': None,
+    'servo': None,
+    'ekf_flags': None,
+    'takeoff_start_z': None,
+    'takeoff_target_z': None,
+    'ts': 0.0,
+}
+_telem_lock = threading.Lock()
+
+
+def _tset(**kw) -> None:
+    with _telem_lock:
+        _telem.update(kw)
+        _telem['ts'] = time.time()
+
+
 # ── flight control ───────────────────────────────────────────────────────────
 
 def connect(port=FC_PORT, baud=FC_BAUD):
@@ -113,6 +135,7 @@ def wait_ready(conn, timeout=15):
         )
         if msg:
             bits = msg.flags
+            _tset(ekf_flags=bits)
             print(
                 f"  EKF={bits:#06x} "
                 f"att={bool(bits&_EKF_ATT)} "
@@ -143,6 +166,7 @@ def set_guided(conn, timeout=5):
         hb = conn.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
         if hb and hb.custom_mode == 4:
             flog("GUIDED mode confirmed")
+            _tset(mode='GUIDED')
             return True
     flog("GUIDED mode NOT confirmed — proceeding anyway")
     return False
@@ -159,6 +183,7 @@ def arm(conn, timeout=8):
         1, 0, 0, 0, 0, 0, 0
     )
     flog("ARM command sent — waiting for heartbeat...")
+    _tset(phase='arming', armed=False)
     deadline = time.time() + timeout
     while time.time() < deadline:
         msg = conn.recv_match(
@@ -173,8 +198,10 @@ def arm(conn, timeout=8):
             armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
             if armed:
                 flog("Armed OK")
+                _tset(armed=True, phase='armed')
                 return True
     flog("ARM FAILED — check pre-arm messages above")
+    _tset(phase='arm_failed')
     return False
 
 
@@ -259,7 +286,7 @@ def takeoff(conn, alt=TAKEOFF_ALT):
     else:
         flog("TAKEOFF: no ACK — FC may not be ready")
 
-    # start_z captures baro baseline so we detect RELATIVE climb, not absolute
+    _tset(phase='takeoff')
     start_z = None
     last_log = 0.0
     last_servo = 0.0
@@ -274,10 +301,14 @@ def takeoff(conn, alt=TAKEOFF_ALT):
         t = msg.get_type()
         if t == 'HEARTBEAT':
             armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            _tset(armed=bool(armed))
             if not armed:
                 flog("TAKEOFF ABORTED: drone disarmed mid-flight!")
+                _tset(phase='disarmed')
                 return None
         elif t == 'SERVO_OUTPUT_RAW':
+            _tset(servo=(msg.servo1_raw, msg.servo2_raw,
+                         msg.servo3_raw, msg.servo4_raw))
             now2 = time.time()
             if now2 - last_servo > 2.0:
                 flog(
@@ -287,13 +318,20 @@ def takeoff(conn, alt=TAKEOFF_ALT):
                 )
                 last_servo = now2
         elif t == 'LOCAL_POSITION_NED':
+            _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
             if start_z is None:
                 start_z = msg.z
                 threshold = start_z - (alt - TOLERANCE)
+                _tset(takeoff_start_z=start_z, takeoff_target_z=threshold)
                 flog(
                     f"TAKEOFF: start_z={start_z:.2f}m  "
                     f"need z<{threshold:.2f}m  (Δ≥{alt-TOLERANCE:.1f}m)"
                 )
+                if start_z < -(alt - 0.2):
+                    flog(
+                        f"  WARNING: start_z={start_z:.2f}m already below "
+                        f"target {threshold:.2f}m — baro drift detected!"
+                    )
             threshold = start_z - (alt - TOLERANCE)
             now2 = time.time()
             if now2 - last_log > 1.0:
@@ -320,6 +358,7 @@ def land(conn):
         0, 0, 0, 0, 0, 0, 0
     )
     flog("Landing command sent")
+    _tset(phase='landing')
 
 
 def debug_status(conn, uwb, duration=15):
@@ -422,10 +461,12 @@ def _flight(conn, uwb):
             flog("[FLIGHT] Takeoff failed — aborting")
             return
         flog(f"Hovering 2s at z={hover_z:.2f}m...")
+        _tset(phase='hover')
         held = hold(conn, 0, 0, hover_z, 2.0, uwb=uwb)
         if held:
             land(conn)
         flog("Done")
+        _tset(phase='done', armed=False)
     except Exception as e:
         flog(f"[FLIGHT] Exception: {e}")
         _emergency_disarm(conn)
@@ -433,7 +474,105 @@ def _flight(conn, uwb):
 
 # ── visualization (main thread) ──────────────────────────────────────────────
 
-def _update(frame, ax_info, ax_map, ax_log, uwb):
+def _draw_fc_panel(ax, uwb):
+    ax.cla()
+    ax.set_title("FC Telemetry")
+    ax.axis('off')
+
+    with _telem_lock:
+        t = dict(_telem)
+
+    lines = []
+
+    # phase / armed / mode
+    phase = t.get('phase', 'init')
+    armed = t.get('armed')
+    mode  = t.get('mode') or '?'
+    arm_str = 'ARMED' if armed else ('DISARMED' if armed is not None else '?')
+    lines.append(f"Phase : {phase.upper():<12}  Mode: {mode}")
+    lines.append(f"Armed : {arm_str}")
+    lines.append("")
+
+    # LOCAL_NED z — highlight baro drift
+    ned_z = t.get('ned_z')
+    ned_x = t.get('ned_x') or 0.0
+    ned_y = t.get('ned_y') or 0.0
+    if ned_z is not None:
+        drift = ned_z < -0.5
+        lines.append(
+            f"LOCAL_NED  x={ned_x:+.2f}  y={ned_y:+.2f}  z={ned_z:+.2f}m"
+            + ("  ← BARO DRIFT" if drift else "")
+        )
+    else:
+        lines.append("LOCAL_NED: waiting...")
+    lines.append("")
+
+    # takeoff progress
+    start_z  = t.get('takeoff_start_z')
+    target_z = t.get('takeoff_target_z')
+    if start_z is not None:
+        lines.append(f"Takeoff start_z  = {start_z:+.2f}m")
+        lines.append(f"        target_z = {target_z:+.2f}m"
+                     f"  (need Δ≥{TAKEOFF_ALT-TOLERANCE:.1f}m)")
+        if ned_z is not None:
+            delta = start_z - ned_z
+            pct   = max(0.0, min(delta / TAKEOFF_ALT, 1.0))
+            bar   = '█' * int(pct * 16) + '░' * (16 - int(pct * 16))
+            lines.append(f"        climbed  = {delta:.2f}/{TAKEOFF_ALT:.1f}m"
+                         f"  [{bar}]")
+        if start_z < -(TAKEOFF_ALT - 0.2):
+            lines.append("  !! start_z already below target — baro drift!")
+    lines.append("")
+
+    # SERVO
+    servo = t.get('servo')
+    if servo is not None:
+        motors_on = any(v > 1050 for v in servo)
+        lines.append(
+            f"SERVO: {servo[0]:4d} {servo[1]:4d} {servo[2]:4d} {servo[3]:4d}"
+            + ("" if motors_on else "  ← MOTORS OFF")
+        )
+    else:
+        lines.append("SERVO: waiting...")
+    lines.append("")
+
+    # EKF
+    ekf = t.get('ekf_flags')
+    if ekf is not None:
+        ok = (ekf & _EKF_NEED) == _EKF_NEED
+        lines.append(f"EKF: {'READY' if ok else 'NOT READY'}  ({ekf:#06x})")
+        lines.append(
+            f"  att={bool(ekf&_EKF_ATT)}"
+            f"  vel={bool(ekf&_EKF_VEL_H)}"
+            f"  pos_rel={bool(ekf&_EKF_POS_REL)}"
+            f"  pos_abs={bool(ekf&_EKF_POS_ABS)}"
+        )
+    lines.append("")
+
+    # UWB-EKF z drift
+    tags = uwb.get_tags()
+    if tags and ned_z is not None:
+        info = next(iter(tags.values()))
+        uwb_z = info['z']
+        dz    = uwb_z - ned_z
+        lines.append(f"UWB z={uwb_z:+.2f}m  EKF z={ned_z:+.2f}m  Δz={dz:+.2f}m")
+
+    # color
+    if start_z is not None and start_z < -(TAKEOFF_ALT - 0.2):
+        col = '#c0392b'
+    elif ned_z is not None and ned_z < -0.5:
+        col = '#e67e22'
+    elif armed:
+        col = '#27ae60'
+    else:
+        col = '#2c3e50'
+
+    ax.text(0.03, 0.97, '\n'.join(lines),
+            transform=ax.transAxes,
+            va='top', fontsize=8, family='monospace', color=col)
+
+
+def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
     now = time.time()
     tags = uwb.get_tags()
     stale = 1.0
@@ -515,6 +654,9 @@ def _update(frame, ax_info, ax_map, ax_log, uwb):
             transform=ax_map.transAxes,
         )
 
+    # ── FC telemetry ─────────────────────────────────────────────────────────
+    _draw_fc_panel(ax_fc, uwb)
+
     # ── flight log ───────────────────────────────────────────────────────────
     ax_log.cla()
     ax_log.set_title("Flight log")
@@ -576,11 +718,15 @@ def main():
     ft = threading.Thread(target=_flight, args=(conn, uwb), daemon=True)
     ft.start()
 
-    fig, (ax_info, ax_map, ax_log) = plt.subplots(1, 3, figsize=(19, 5))
+    fig = plt.figure(figsize=(18, 9))
     fig.suptitle("ArduPilot + GrowSpace UWB", fontsize=13, fontweight='bold')
+    ax_info = fig.add_subplot(2, 2, 1)
+    ax_map  = fig.add_subplot(2, 2, 2)
+    ax_fc   = fig.add_subplot(2, 2, 3)
+    ax_log  = fig.add_subplot(2, 2, 4)
     ax_map.set_aspect('equal')
     fig.ani = animation.FuncAnimation(
-        fig, _update, fargs=(ax_info, ax_map, ax_log, uwb),
+        fig, _update, fargs=(ax_info, ax_map, ax_fc, ax_log, uwb),
         interval=200, cache_frame_data=False,
     )
     plt.tight_layout()
