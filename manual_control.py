@@ -488,26 +488,80 @@ def takeoff(conn, alt=TAKEOFF_ALT, uwb=None):
     return None
 
 
-def reset_home(conn, timeout=5):
-    """Set home to current position right before ARM so z≈0 at takeoff."""
+def calibrate_baro(conn, settle=4.0, timeout=5):
+    """Reset baro ground pressure reference so LOCAL_NED z → ~0.
+
+    MAV_CMD_PREFLIGHT_CALIBRATION param3=1 = ground pressure reset.
+    Must be called while DISARMED (ArduPilot rejects when armed).
+    After ACK, waits `settle` seconds for EKF z to converge, then logs new z.
+
+    Why: baro drifts 3-6m between FC boot and ARM time.
+    After reset, EKF z ≈ 0 → matches UWB z ≈ 0 → innovation gap removed
+    → EKF fuses UWB z → position controller gets correct altitude.
+    Source: MAVLink spec MAV_CMD_PREFLIGHT_CALIBRATION (cmd=241), param3
+    """
+    flog("BARO CAL: sending ground pressure reset (param3=1)...")
     conn.mav.command_long_send(
         conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_CMD_DO_SET_HOME, 0,
-        1, 0, 0, 0, 0, 0, 0  # param1=1: use current location
+        mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION,
+        0,   # confirmation
+        0,   # param1: gyro
+        0,   # param2: mag
+        1,   # param3: ground pressure (baro) reset ← key
+        0,   # param4: radio
+        0,   # param5: accel
+        0,   # param6
+        0    # param7
     )
-    flog("HOME RESET: sent — waiting for ACK...")
+
+    # wait for ACK
+    ack_ok = False
     deadline = time.time() + timeout
     while time.time() < deadline:
-        msg = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=1.0)
-        if msg and msg.command == mavutil.mavlink.MAV_CMD_DO_SET_HOME:
-            if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                flog("HOME RESET: accepted — baro z reset to ~0")
-                return True
-            else:
-                flog(f"HOME RESET: rejected (result={msg.result}) — proceeding")
-                return False
-    flog("HOME RESET: no ACK — proceeding anyway")
-    return False
+        msg = conn.recv_match(
+            type=['COMMAND_ACK', 'STATUSTEXT'],
+            blocking=True, timeout=1.0
+        )
+        if msg is None:
+            continue
+        if msg.get_type() == 'STATUSTEXT':
+            flog(f"  FC: {msg.text.strip()}")
+        if msg.get_type() == 'COMMAND_ACK':
+            if msg.command == mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION:
+                result_map = {0: 'ACCEPTED', 1: 'TEMP_REJECTED',
+                              2: 'DENIED', 3: 'UNSUPPORTED'}
+                result_str = result_map.get(msg.result, str(msg.result))
+                flog(f"BARO CAL ACK: {result_str} (result={msg.result})")
+                ack_ok = (msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED)
+                break
+
+    if not ack_ok:
+        flog("BARO CAL: no ACK or rejected — proceeding (z may still be drifted)")
+
+    # wait for EKF z to converge to new baro reference
+    flog(f"BARO CAL: waiting {settle:.0f}s for EKF z to settle...")
+    z_samples = []
+    deadline2 = time.time() + settle
+    while time.time() < deadline2:
+        m = conn.recv_match(
+            type='LOCAL_POSITION_NED', blocking=True, timeout=0.5
+        )
+        if m:
+            z_samples.append(m.z)
+            print(f"  baro settle: z={m.z:.3f}m", end="\r")
+    print()
+
+    if z_samples:
+        final_z = z_samples[-1]
+        avg_z = sum(z_samples) / len(z_samples)
+        flog(f"BARO CAL: final z={final_z:.3f}m  avg={avg_z:.3f}m"
+             f"  samples={len(z_samples)}")
+        if abs(final_z) < 0.5:
+            flog("BARO CAL: z near 0 — calibration effective")
+        else:
+            flog(f"BARO CAL: z still {final_z:.3f}m — "
+                 f"calibration may not have worked")
+    return ack_ok
 
 
 def land(conn):
@@ -611,6 +665,8 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
+        calibrate_baro(conn)     # baro z → ~0 before ARM
+        wait_ready(conn, timeout=8)  # re-check EKF after baro reset
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
