@@ -363,6 +363,28 @@ def takeoff(conn, alt=TAKEOFF_ALT):
     return None
 
 
+def reset_home(conn, timeout=5):
+    """Set home to current position right before ARM so z≈0 at takeoff."""
+    conn.mav.command_long_send(
+        conn.target_system, conn.target_component,
+        mavutil.mavlink.MAV_CMD_DO_SET_HOME, 0,
+        1, 0, 0, 0, 0, 0, 0  # param1=1: use current location
+    )
+    flog("HOME RESET: sent — waiting for ACK...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        msg = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=1.0)
+        if msg and msg.command == mavutil.mavlink.MAV_CMD_DO_SET_HOME:
+            if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                flog("HOME RESET: accepted — baro z reset to ~0")
+                return True
+            else:
+                flog(f"HOME RESET: rejected (result={msg.result}) — proceeding")
+                return False
+    flog("HOME RESET: no ACK — proceeding anyway")
+    return False
+
+
 def land(conn):
     conn.mav.command_long_send(
         conn.target_system, conn.target_component,
@@ -464,6 +486,8 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
+        reset_home(conn)
+        time.sleep(0.5)
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
