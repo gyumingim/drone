@@ -91,68 +91,6 @@ def connect(port=FC_PORT, baud=FC_BAUD):
     raise RuntimeError("FC not found on any ACM port")
 
 
-def ensure_fresh_ekf(conn, port=FC_PORT, baud=FC_BAUD):
-    """Ensure EK3_SRC1_POSZ=6 (ExternalNav z) and EKF z ≈ 0. Reboots if needed."""
-    # enable position stream so LOCAL_POSITION_NED arrives
-    conn.mav.request_data_stream_send(
-        conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1,
-    )
-    time.sleep(0.3)
-
-    # read EK3_SRC1_POSZ
-    conn.mav.param_request_read_send(
-        conn.target_system, conn.target_component,
-        'EK3_SRC1_POSZ', -1,
-    )
-    posz = None
-    dl = time.time() + 5.0
-    while time.time() < dl:
-        m = conn.recv_match(type='PARAM_VALUE', blocking=True, timeout=1.0)
-        if m and m.param_id.rstrip('\x00') == 'EK3_SRC1_POSZ':
-            posz = int(m.param_value)
-            flog(f"EK3_SRC1_POSZ = {posz}")
-            break
-    if posz is None:
-        flog("EK3_SRC1_POSZ: read timeout")
-
-    need_reboot = False
-    if posz != 6:
-        flog(f"EK3_SRC1_POSZ={posz} → setting 6 (ExternalNav z, UWB)")
-        conn.mav.param_set_send(
-            conn.target_system, conn.target_component,
-            'EK3_SRC1_POSZ', 6.0,
-            mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
-        )
-        time.sleep(0.3)
-        need_reboot = True
-
-    # check EKF z drift — if large, reboot so EKF starts fresh at z≈0
-    pos = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=3.0)
-    if pos:
-        flog(f"EKF z = {pos.z:.2f}m")
-        if abs(pos.z) > 2.0:
-            flog(f"  z={pos.z:.2f}m > 2m — baro drift detected, reboot needed")
-            need_reboot = True
-    else:
-        flog("LOCAL_POSITION_NED: read timeout")
-
-    if need_reboot:
-        flog("Rebooting FC via MAVLink...")
-        conn.mav.command_long_send(
-            conn.target_system, conn.target_component,
-            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-            0, 1, 0, 0, 0, 0, 0, 0,
-        )
-        flog("Waiting 10s for FC to restart...")
-        time.sleep(10.0)
-        flog("Reconnecting after reboot...")
-        conn = connect(port, baud)
-        flog("Reconnected — EKF should now start from z=0")
-
-    return conn
-
-
 def send_global_origin(conn, lat=0.0, lon=0.0, alt=0.0):
     """EKF local frame origin — dummy value OK for indoor ExternalNav."""
     conn.mav.set_gps_global_origin_send(
@@ -770,7 +708,6 @@ def _heartbeat_loop(conn, stop_evt):
 
 def main():
     conn = connect()
-    conn = ensure_fresh_ekf(conn)
     uwb = UWBTag(conn)
     uwb.start()
 
