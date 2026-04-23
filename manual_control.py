@@ -19,39 +19,22 @@ FC_PORT = '/dev/ttyACM0'
 FC_BAUD = 57600
 
 TAKEOFF_ALT = 1.0
-CLIMB_RATE  = 0.3   # m/s — velocity climb rate (PILOT_SPEED_UP=50cm/s cap in ArduPilot)
-TOLERANCE   = 0.3
-MOVE_DIST   = 0.30  # m — N/E/S/W leg length
+CLIMB_RATE  = 0.05  # m/s
+TOLERANCE = 0.3
 
 COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12',
           '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
 
-# typemask: ignore bits set = field unused
-# _POS_ONLY (3808): use position x,y,z only — velocity/accel/yaw ignored
-# _VEL_ONLY (3527): use velocity vx,vy,vz only — position/accel/yaw ignored
-#   source: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
-#           pymavlink dialects/v10/common.py POSITION_TARGET_TYPEMASK
 _POS_ONLY = (
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE |   # 8
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE |   # 16
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE |   # 32
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |   # 64
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |   # 128
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |   # 256
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |  # 1024
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE  # 2048
-)  # = 3576 → uses x,y,z
-
-_VEL_ONLY = (
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |    # 1
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |    # 2
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE |    # 4
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |   # 64
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |   # 128
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |   # 256
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |  # 1024
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE  # 2048
-)  # = 3527 → uses vx,vy,vz
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+)
 
 # ── flight log (shared with visualization) ───────────────────────────────────
 
@@ -235,24 +218,6 @@ def send_position(conn, x, y, z):
     )
 
 
-def send_velocity(conn, vx, vy, vz):
-    """Send velocity setpoint (NED frame, m/s). vz<0 = climb.
-    Must be re-sent at least every 3s or vehicle stops.
-    typemask=3527: ignores position and acceleration, uses vx,vy,vz only.
-    Source: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
-    """
-    conn.mav.set_position_target_local_ned_send(
-        0,
-        conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        _VEL_ONLY,
-        0, 0, 0,
-        vx, vy, vz,
-        0, 0, 0,
-        0, 0
-    )
-
-
 def goto(conn, x, y, z, tolerance=TOLERANCE, timeout=30):
     flog(f"goto ({x:.1f}, {y:.1f}, alt={-z:.1f}m)")
     deadline = time.time() + timeout
@@ -306,248 +271,84 @@ def hold(conn, x, y, z, duration, uwb=None):
     return True
 
 
-def takeoff(conn, alt=TAKEOFF_ALT, uwb=None):
-    """Takeoff NAV_TAKEOFF-only:
-    1. NAV_TAKEOFF  → triggers motor spin-up (bypasses land detector)
-    2. NO velocity/position commands — sending any SET_POSITION_TARGET while
-       on ground switches ArduPilot from "takeoff submode" to "guided submode",
-       re-engaging land detector and capping throttle at minimum (~1100 PWM).
-       NAV_TAKEOFF is left to run uninterrupted until drone is airborne.
-    3. completion   → UWB z primary check, EKF z fallback
-    """
-    # ── 1. read ground state ─────────────────────────────────────────────────
-    flog("TAKEOFF: reading ground EKF position...")
-    ground = None
-    for attempt in range(10):
-        m = conn.recv_match(
-            type='LOCAL_POSITION_NED', blocking=True, timeout=1.0
-        )
-        if m:
-            ground = m
-            flog(f"TAKEOFF: EKF ground  x={m.x:.3f} y={m.y:.3f}"
-                 f" z={m.z:.3f} (attempt {attempt+1})")
-            break
-        flog(f"TAKEOFF: no LOCAL_NED yet ({attempt+1}/10)")
-    if ground is None:
-        flog("TAKEOFF FAILED: no LOCAL_POSITION_NED received")
-        return None
-
-    uwb_ground_z = None
-    if uwb is not None:
-        dp = uwb.get_drone_pos()
-        if dp is not None:
-            uwb_ground_z = dp[2]
-            flog(f"TAKEOFF: UWB ground  z={uwb_ground_z:.3f}m"
-                 f"  height={-uwb_ground_z:.3f}m above UWB origin")
-        else:
-            flog("TAKEOFF: UWB pos not available — will use EKF z fallback")
-
-    hold_x  = ground.x
-    hold_y  = ground.y
-    start_z = ground.z
-    # EKF target kept for reference/hover after takeoff
-    ekf_target_z = start_z - alt
-    ekf_threshold = start_z - (alt - TOLERANCE)
-
-    # UWB: log only, not used for completion
-    if uwb_ground_z is not None:
-        uwb_threshold = uwb_ground_z - (alt - TOLERANCE)
-    else:
-        uwb_threshold = -(alt - TOLERANCE)
-
-    flog("=" * 50)
-    flog("TAKEOFF CONFIG:")
-    flog(f"  hold_xy       = ({hold_x:.3f}, {hold_y:.3f})")
-    flog(f"  EKF start_z   = {start_z:.3f}m  (baro-based, may be drifted)")
-    flog(f"  EKF target_z  = {ekf_target_z:.3f}m  threshold={ekf_threshold:.3f}m")
-    flog(f"  UWB ground_z  = {uwb_ground_z:.3f}m" if uwb_ground_z is not None
-         else "  UWB ground_z  = N/A")
-    flog(f"  nav_alt       = {alt:.1f}m  (NAV_TAKEOFF — direct alt)")
-    flog("=" * 50)
-
-    # ── 2. send NAV_TAKEOFF to spin up motors ────────────────────────────────
+def takeoff(conn, alt=TAKEOFF_ALT):
+    """Takeoff using MAV_CMD_NAV_TAKEOFF then wait for altitude."""
     conn.mav.command_long_send(
         conn.target_system, conn.target_component,
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
-        0, 0, 0, float('nan'), 0, 0, alt,
+        0, 0, 0, float('nan'),   # min_pitch, empty, empty, yaw
+        0, 0, alt,               # lat, lon, altitude (m above home)
     )
-    flog(f"NAV_TAKEOFF sent: alt={alt:.1f}m")
-    _tset(phase='takeoff', takeoff_start_z=start_z,
-          takeoff_target_z=ekf_threshold)
+    flog(f"TAKEOFF cmd sent, target={alt}m")
+    ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+    if ack:
+        flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
+    else:
+        flog("TAKEOFF: no ACK — FC may not be ready")
 
-    # ── 3. climb loop ────────────────────────────────────────────────────────
-    # NAV_TAKEOFF bypasses land detector — do NOT send any position/velocity
-    # commands until the drone is confirmed airborne (UWB z threshold).
-    # Sending SET_POSITION_TARGET while on ground switches ArduPilot from
-    # "takeoff" submode to "guided" submode, re-engaging land detector
-    # and capping throttle at minimum (~1100 PWM).
-    motors_on = False
+    _tset(phase='takeoff')
+    start_z = None
     last_log = 0.0
     last_servo = 0.0
-    deadline = time.time() + 30  # 30s hard timeout
-
+    deadline = time.time() + alt / CLIMB_RATE * 5
     while time.time() < deadline:
-        now = time.time()
-
         msg = conn.recv_match(
-            type=['LOCAL_POSITION_NED', 'SERVO_OUTPUT_RAW',
-                  'HEARTBEAT', 'COMMAND_ACK'],
+            type=['LOCAL_POSITION_NED', 'SERVO_OUTPUT_RAW', 'HEARTBEAT'],
             blocking=True, timeout=0.5,
         )
         if msg is None:
             continue
-
         t = msg.get_type()
-
-        if t == 'COMMAND_ACK':
-            result_map = {0: 'OK', 1: 'IN_PROGRESS', 2: 'DENIED',
-                          3: 'UNSUPPORTED', 4: 'FAILED', 5: 'IN_PROGRESS'}
-            flog(f"  ACK: cmd={msg.command}"
-                 f"  result={result_map.get(msg.result, msg.result)}"
-                 f" ({msg.result})")
-
-        elif t == 'HEARTBEAT':
-            armed = bool(
-                msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-            )
-            _tset(armed=armed, mode=str(msg.custom_mode))
+        if t == 'HEARTBEAT':
+            armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            _tset(armed=bool(armed))
             if not armed:
-                flog(f"TAKEOFF ABORTED: drone disarmed!"
-                     f"  mode={msg.custom_mode}")
+                flog("TAKEOFF ABORTED: drone disarmed mid-flight!")
                 _tset(phase='disarmed')
                 return None
-
         elif t == 'SERVO_OUTPUT_RAW':
-            svs = (msg.servo1_raw, msg.servo2_raw,
-                   msg.servo3_raw, msg.servo4_raw)
-            _tset(servo=svs)
-            spinning = any(v > 1100 for v in svs)
-            if not motors_on and spinning:
-                motors_on = True
-                flog(f"MOTORS ON: {svs}  (NAV_TAKEOFF driving — no override)")
-                _tset(phase='climbing')
-            if now - last_servo > 1.5:
-                flog(f"  SERVO: {svs[0]} {svs[1]} {svs[2]} {svs[3]}"
-                     f"  {'SPINNING' if spinning else 'IDLE'}"
-                     f"  motors_on={motors_on}")
-                last_servo = now
-
+            _tset(servo=(msg.servo1_raw, msg.servo2_raw,
+                         msg.servo3_raw, msg.servo4_raw))
+            now2 = time.time()
+            if now2 - last_servo > 2.0:
+                flog(
+                    f"SERVO: {msg.servo1_raw} {msg.servo2_raw}"
+                    f" {msg.servo3_raw} {msg.servo4_raw}"
+                    f" {'(motors off!)' if msg.servo1_raw <= 1000 else ''}"
+                )
+                last_servo = now2
         elif t == 'LOCAL_POSITION_NED':
             _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
+            if start_z is None:
+                start_z = msg.z
+                threshold = start_z - (alt - TOLERANCE)
+                _tset(takeoff_start_z=start_z, takeoff_target_z=threshold)
+                flog(
+                    f"TAKEOFF: start_z={start_z:.2f}m  "
+                    f"need z<{threshold:.2f}m  (Δ≥{alt-TOLERANCE:.1f}m)"
+                )
+                if start_z < -(alt - 0.2):
+                    flog(
+                        f"  WARNING: start_z={start_z:.2f}m already below "
+                        f"target {threshold:.2f}m — baro drift detected!"
+                    )
+            threshold = start_z - (alt - TOLERANCE)
+            now2 = time.time()
+            if now2 - last_log > 1.0:
+                delta = start_z - msg.z
+                flog(f"  climbing: z={msg.z:.2f}m  Δ={delta:.2f}/{alt:.1f}m")
+                last_log = now2
+            print(f"  z={msg.z:.2f}m", end="\r")
+            if msg.z < threshold:
+                delta = start_z - msg.z
+                flog(
+                    f"Takeoff complete: z={msg.z:.2f}m  "
+                    f"Δ={delta:.2f}m from start"
+                )
+                return (msg.x, msg.y, msg.z)
 
-            # read UWB z every cycle for completion check
-            uwb_z = None
-            if uwb is not None:
-                dp = uwb.get_drone_pos()
-                if dp is not None:
-                    uwb_z = dp[2]
-
-            if now - last_log > 0.5:
-                ekf_delta = start_z - msg.z
-                uwb_str = (f"  UWB_z={uwb_z:.3f}"
-                           if uwb_z is not None else "  UWB=N/A")
-                flog(f"  EKF z={msg.z:.3f}  Δ={ekf_delta:.3f}/{alt:.1f}m"
-                     f"{uwb_str}"
-                     f"  motors={'ON' if motors_on else 'OFF'}")
-                last_log = now
-
-            # ── completion check (EKF z relative — same as first successful flight)
-            if msg.z < ekf_threshold:
-                ekf_delta = start_z - msg.z
-                flog("TAKEOFF COMPLETE:"
-                     f" z={msg.z:.3f} < threshold={ekf_threshold:.3f}"
-                     f"  Δ={ekf_delta:.3f}m")
-                if uwb_z is not None:
-                    flog(f"  UWB_z={uwb_z:.3f} (reference)")
-                return (msg.x, msg.y, ekf_target_z)
-
-    flog(f"TAKEOFF TIMEOUT after 30s  motors_on={motors_on}")
+    flog("TAKEOFF TIMEOUT — drone may not have moved")
     return None
-
-
-def calibrate_baro(conn, settle=4.0, timeout=5):
-    """Reset baro ground pressure reference so LOCAL_NED z → ~0.
-
-    MAV_CMD_PREFLIGHT_CALIBRATION param3=1 = ground pressure reset.
-    Must be called while DISARMED (ArduPilot rejects when armed).
-    After ACK, waits `settle` seconds for EKF z to converge, then logs new z.
-
-    Why: baro drifts 3-6m between FC boot and ARM time.
-    After reset, EKF z ≈ 0 → matches UWB z ≈ 0 → innovation gap removed
-    → EKF fuses UWB z → position controller gets correct altitude.
-    Source: MAVLink spec MAV_CMD_PREFLIGHT_CALIBRATION (cmd=241), param3
-    """
-    flog("BARO CAL: sending ground pressure reset (param3=1)...")
-    conn.mav.command_long_send(
-        conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION,
-        0,   # confirmation
-        0,   # param1: gyro
-        0,   # param2: mag
-        1,   # param3: ground pressure (baro) reset ← key
-        0,   # param4: radio
-        0,   # param5: accel
-        0,   # param6
-        0    # param7
-    )
-
-    # wait for ACK
-    ack_ok = False
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        msg = conn.recv_match(
-            type=['COMMAND_ACK', 'STATUSTEXT'],
-            blocking=True, timeout=1.0
-        )
-        if msg is None:
-            continue
-        if msg.get_type() == 'STATUSTEXT':
-            flog(f"  FC: {msg.text.strip()}")
-        if msg.get_type() == 'COMMAND_ACK':
-            if msg.command == mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION:
-                result_map = {
-                    0: 'ACCEPTED',
-                    1: 'IN_PROGRESS',
-                    2: 'DENIED',
-                    3: 'UNSUPPORTED',
-                    4: 'FAILED',
-                    5: 'IN_PROGRESS',   # MAV_RESULT_IN_PROGRESS
-                }
-                result_str = result_map.get(msg.result, str(msg.result))
-                flog(f"BARO CAL ACK: {result_str} (result={msg.result})")
-                if msg.result in (1, 5):
-                    # IN_PROGRESS — keep waiting for final ACK
-                    continue
-                ack_ok = (msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED)
-                break
-
-    if not ack_ok:
-        flog("BARO CAL: no ACK or rejected — proceeding (z may still be drifted)")
-
-    # wait for EKF z to converge to new baro reference
-    flog(f"BARO CAL: waiting {settle:.0f}s for EKF z to settle...")
-    z_samples = []
-    deadline2 = time.time() + settle
-    while time.time() < deadline2:
-        m = conn.recv_match(
-            type='LOCAL_POSITION_NED', blocking=True, timeout=0.5
-        )
-        if m:
-            z_samples.append(m.z)
-            print(f"  baro settle: z={m.z:.3f}m", end="\r")
-    print()
-
-    if z_samples:
-        final_z = z_samples[-1]
-        avg_z = sum(z_samples) / len(z_samples)
-        flog(f"BARO CAL: final z={final_z:.3f}m  avg={avg_z:.3f}m"
-             f"  samples={len(z_samples)}")
-        if abs(final_z) < 0.5:
-            flog("BARO CAL: z near 0 — calibration effective")
-        else:
-            flog(f"BARO CAL: z still {final_z:.3f}m — "
-                 f"calibration may not have worked")
-    return ack_ok
 
 
 def land(conn):
@@ -655,39 +456,16 @@ def _flight(conn, uwb):
             flog("[FLIGHT] ARM failed — aborting")
             return
         time.sleep(0.5)
-        result = takeoff(conn, TAKEOFF_ALT, uwb)
+        result = takeoff(conn, TAKEOFF_ALT)
         if result is None:
             flog("[FLIGHT] Takeoff failed — aborting")
             return
         hover_x, hover_y, hover_z = result
         flog(f"Hovering 2s at ({hover_x:.2f},{hover_y:.2f},{hover_z:.2f})...")
         _tset(phase='hover')
-        if not hold(conn, hover_x, hover_y, hover_z, 2.0, uwb=uwb):
-            return
-
-        # N → E → S → W square, each leg 30cm from hover position
-        d = MOVE_DIST
-        legs = [
-            ('North', hover_x + d, hover_y    ),
-            ('East',  hover_x,     hover_y + d),
-            ('South', hover_x - d, hover_y    ),
-            ('West',  hover_x,     hover_y - d),
-        ]
-        for name, wx, wy in legs:
-            flog(f"Moving {name} {int(d*100)}cm → ({wx:.2f},{wy:.2f})")
-            _tset(phase=f'move_{name.lower()}')
-            if not goto(conn, wx, wy, hover_z, timeout=15):
-                flog(f"[FLIGHT] {name} move failed — landing")
-                land(conn)
-                return
-            if not hold(conn, wx, wy, hover_z, 1.0, uwb=uwb):
-                return
-
-        flog(f"Returning home ({hover_x:.2f},{hover_y:.2f})...")
-        _tset(phase='return')
-        goto(conn, hover_x, hover_y, hover_z, timeout=15)
-        hold(conn, hover_x, hover_y, hover_z, 1.0, uwb=uwb)
-        land(conn)
+        held = hold(conn, hover_x, hover_y, hover_z, 2.0, uwb=uwb)
+        if held:
+            land(conn)
         flog("Done")
         _tset(phase='done', armed=False)
     except Exception as e:
