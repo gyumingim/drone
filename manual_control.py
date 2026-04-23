@@ -482,13 +482,13 @@ def _flight(conn, uwb):
         else:
             flog("UWB origin timeout — proceeding anyway")
 
+        calibrate_baro(conn)
         debug_status(conn, uwb, duration=15)
 
         wait_ready(conn)
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
-        calibrate_baro(conn)
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return

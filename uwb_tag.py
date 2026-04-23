@@ -207,8 +207,7 @@ class UWBTag:
             return
         if self._baro_getter is not None:
             baro_up = self._baro_getter()
-            if baro_up is not None:
-                z = -baro_up  # baro up-positive → NED negative-up
+            z = -baro_up if baro_up is not None else 0.0
         # covariance: upper-triangle of 6x6 (pos x,y,z + rot r,p,y)
         # indices 0,6,11 = position variances; 15,18,20 = angle variances
         cov = [0.0] * 21
