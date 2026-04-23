@@ -20,7 +20,8 @@ FC_BAUD = 57600
 
 TAKEOFF_ALT = 1.0
 CLIMB_RATE  = 0.05  # m/s
-TOLERANCE = 0.3
+TOLERANCE   = 0.3
+MOVE_DIST   = 0.30  # m — N/E/S/W leg length
 
 COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12',
           '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
@@ -272,26 +273,36 @@ def hold(conn, x, y, z, duration, uwb=None):
 
 
 def takeoff(conn, alt=TAKEOFF_ALT):
-    """Takeoff using MAV_CMD_NAV_TAKEOFF then wait for altitude."""
-    conn.mav.command_long_send(
-        conn.target_system, conn.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
-        0, 0, 0, float('nan'),   # min_pitch, empty, empty, yaw
-        0, 0, alt,               # lat, lon, altitude (m above home)
-    )
-    flog(f"TAKEOFF cmd sent, target={alt}m")
-    ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-    if ack:
-        flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
-    else:
-        flog("TAKEOFF: no ACK — FC may not be ready")
+    """Climb alt meters using SET_POSITION_TARGET (relative to current z).
+    Returns (x, y, z) of hover position, or None on failure.
+    """
+    flog("TAKEOFF: reading ground position...")
+    ground = None
+    for _ in range(10):
+        m = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1.0)
+        if m:
+            ground = m
+            break
+    if ground is None:
+        flog("TAKEOFF FAILED: no LOCAL_POSITION_NED")
+        return None
 
-    _tset(phase='takeoff')
-    start_z = None
+    hold_x  = ground.x
+    hold_y  = ground.y
+    start_z = ground.z
+    target_z   = start_z - alt
+    threshold  = start_z - (alt - TOLERANCE)
+    _tset(phase='takeoff', takeoff_start_z=start_z, takeoff_target_z=threshold)
+    flog(
+        f"TAKEOFF: start=({hold_x:.2f},{hold_y:.2f},{start_z:.2f})  "
+        f"target_z={target_z:.2f}m  threshold={threshold:.2f}m"
+    )
+
     last_log = 0.0
     last_servo = 0.0
     deadline = time.time() + alt / CLIMB_RATE * 5
     while time.time() < deadline:
+        send_position(conn, hold_x, hold_y, target_z)
         msg = conn.recv_match(
             type=['LOCAL_POSITION_NED', 'SERVO_OUTPUT_RAW', 'HEARTBEAT'],
             blocking=True, timeout=0.5,
@@ -303,7 +314,7 @@ def takeoff(conn, alt=TAKEOFF_ALT):
             armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
             _tset(armed=bool(armed))
             if not armed:
-                flog("TAKEOFF ABORTED: drone disarmed mid-flight!")
+                flog("TAKEOFF ABORTED: drone disarmed!")
                 _tset(phase='disarmed')
                 return None
         elif t == 'SERVO_OUTPUT_RAW':
@@ -319,20 +330,6 @@ def takeoff(conn, alt=TAKEOFF_ALT):
                 last_servo = now2
         elif t == 'LOCAL_POSITION_NED':
             _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
-            if start_z is None:
-                start_z = msg.z
-                threshold = start_z - (alt - TOLERANCE)
-                _tset(takeoff_start_z=start_z, takeoff_target_z=threshold)
-                flog(
-                    f"TAKEOFF: start_z={start_z:.2f}m  "
-                    f"need z<{threshold:.2f}m  (Δ≥{alt-TOLERANCE:.1f}m)"
-                )
-                if start_z < -(alt - 0.2):
-                    flog(
-                        f"  WARNING: start_z={start_z:.2f}m already below "
-                        f"target {threshold:.2f}m — baro drift detected!"
-                    )
-            threshold = start_z - (alt - TOLERANCE)
             now2 = time.time()
             if now2 - last_log > 1.0:
                 delta = start_z - msg.z
@@ -341,11 +338,8 @@ def takeoff(conn, alt=TAKEOFF_ALT):
             print(f"  z={msg.z:.2f}m", end="\r")
             if msg.z < threshold:
                 delta = start_z - msg.z
-                flog(
-                    f"Takeoff complete: z={msg.z:.2f}m  "
-                    f"Δ={delta:.2f}m from start"
-                )
-                return msg.z
+                flog(f"Takeoff complete: z={msg.z:.2f}m  Δ={delta:.2f}m")
+                return (msg.x, msg.y, msg.z)
 
     flog("TAKEOFF TIMEOUT — drone may not have moved")
     return None
@@ -456,15 +450,39 @@ def _flight(conn, uwb):
             flog("[FLIGHT] ARM failed — aborting")
             return
         time.sleep(0.5)
-        hover_z = takeoff(conn, TAKEOFF_ALT)
-        if hover_z is None:
+        result = takeoff(conn, TAKEOFF_ALT)
+        if result is None:
             flog("[FLIGHT] Takeoff failed — aborting")
             return
-        flog(f"Hovering 2s at z={hover_z:.2f}m...")
+        hover_x, hover_y, hover_z = result
+        flog(f"Hovering 2s at ({hover_x:.2f},{hover_y:.2f},{hover_z:.2f})...")
         _tset(phase='hover')
-        held = hold(conn, 0, 0, hover_z, 2.0, uwb=uwb)
-        if held:
-            land(conn)
+        if not hold(conn, hover_x, hover_y, hover_z, 2.0, uwb=uwb):
+            return
+
+        # N → E → S → W square, each leg 30cm from hover position
+        d = MOVE_DIST
+        legs = [
+            ('North', hover_x + d, hover_y    ),
+            ('East',  hover_x,     hover_y + d),
+            ('South', hover_x - d, hover_y    ),
+            ('West',  hover_x,     hover_y - d),
+        ]
+        for name, wx, wy in legs:
+            flog(f"Moving {name} {int(d*100)}cm → ({wx:.2f},{wy:.2f})")
+            _tset(phase=f'move_{name.lower()}')
+            if not goto(conn, wx, wy, hover_z, timeout=15):
+                flog(f"[FLIGHT] {name} move failed — landing")
+                land(conn)
+                return
+            if not hold(conn, wx, wy, hover_z, 1.0, uwb=uwb):
+                return
+
+        flog(f"Returning home ({hover_x:.2f},{hover_y:.2f})...")
+        _tset(phase='return')
+        goto(conn, hover_x, hover_y, hover_z, timeout=15)
+        hold(conn, hover_x, hover_y, hover_z, 1.0, uwb=uwb)
+        land(conn)
         flog("Done")
         _tset(phase='done', armed=False)
     except Exception as e:
