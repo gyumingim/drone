@@ -349,15 +349,11 @@ def takeoff(conn, alt=TAKEOFF_ALT, uwb=None):
     ekf_target_z = start_z - alt
     ekf_threshold = start_z - (alt - TOLERANCE)
 
-    # UWB threshold: drone must rise (alt-TOLERANCE) above UWB ground z
+    # UWB: log only, not used for completion
     if uwb_ground_z is not None:
         uwb_threshold = uwb_ground_z - (alt - TOLERANCE)
     else:
-        uwb_threshold = -(alt - TOLERANCE)  # fallback: 0.7m above UWB origin
-
-    # nav_alt: large enough so NAV_TAKEOFF target is always above current EKF z
-    # regardless of baro drift direction
-    nav_alt = abs(start_z) + alt + 5.0
+        uwb_threshold = -(alt - TOLERANCE)
 
     flog("=" * 50)
     flog("TAKEOFF CONFIG:")
@@ -365,21 +361,19 @@ def takeoff(conn, alt=TAKEOFF_ALT, uwb=None):
     flog(f"  EKF start_z   = {start_z:.3f}m  (baro-based, may be drifted)")
     flog(f"  EKF target_z  = {ekf_target_z:.3f}m  threshold={ekf_threshold:.3f}m")
     flog(f"  UWB ground_z  = {uwb_ground_z:.3f}m" if uwb_ground_z is not None
-         else "  UWB ground_z  = N/A (fallback mode)")
-    flog(f"  UWB threshold = {uwb_threshold:.3f}m  (need uwb_z < {uwb_threshold:.3f})")
-    flog(f"  nav_alt       = {nav_alt:.1f}m  (NAV_TAKEOFF motor trigger)")
-    flog(f"  NAV_TAKEOFF-only (no velocity cmds — land detector bypass)")
+         else "  UWB ground_z  = N/A")
+    flog(f"  nav_alt       = {alt:.1f}m  (NAV_TAKEOFF — direct alt)")
     flog("=" * 50)
 
     # ── 2. send NAV_TAKEOFF to spin up motors ────────────────────────────────
     conn.mav.command_long_send(
         conn.target_system, conn.target_component,
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
-        0, 0, 0, float('nan'), 0, 0, nav_alt,
+        0, 0, 0, float('nan'), 0, 0, alt,
     )
-    flog(f"NAV_TAKEOFF sent: nav_alt={nav_alt:.1f}m")
+    flog(f"NAV_TAKEOFF sent: alt={alt:.1f}m")
     _tset(phase='takeoff', takeoff_start_z=start_z,
-          takeoff_target_z=uwb_threshold)
+          takeoff_target_z=ekf_threshold)
 
     # ── 3. climb loop ────────────────────────────────────────────────────────
     # NAV_TAKEOFF bypasses land detector — do NOT send any position/velocity
@@ -457,18 +451,14 @@ def takeoff(conn, alt=TAKEOFF_ALT, uwb=None):
                      f"  motors={'ON' if motors_on else 'OFF'}")
                 last_log = now
 
-            # ── completion check (UWB primary) ───────────────────────────
-            if uwb_z is not None and uwb_z < uwb_threshold:
+            # ── completion check (EKF z relative — same as first successful flight)
+            if msg.z < ekf_threshold:
                 ekf_delta = start_z - msg.z
-                flog("TAKEOFF COMPLETE (UWB):"
-                     f" uwb_z={uwb_z:.3f} < threshold={uwb_threshold:.3f}")
-                flog(f"  EKF z={msg.z:.3f}  Δ={ekf_delta:.3f}m")
-                return (msg.x, msg.y, ekf_target_z)
-
-            # ── completion check (EKF fallback, when UWB unavailable) ───
-            if uwb_z is None and msg.z < ekf_threshold:
-                flog("TAKEOFF COMPLETE (EKF fallback):"
-                     f" z={msg.z:.3f} < threshold={ekf_threshold:.3f}")
+                flog("TAKEOFF COMPLETE:"
+                     f" z={msg.z:.3f} < threshold={ekf_threshold:.3f}"
+                     f"  Δ={ekf_delta:.3f}m")
+                if uwb_z is not None:
+                    flog(f"  UWB_z={uwb_z:.3f} (reference)")
                 return (msg.x, msg.y, ekf_target_z)
 
     flog(f"TAKEOFF TIMEOUT after 30s  motors_on={motors_on}")
@@ -661,8 +651,6 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
-        calibrate_baro(conn)     # baro z → ~0 before ARM
-        wait_ready(conn, timeout=8)  # re-check EKF after baro reset
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
