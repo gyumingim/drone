@@ -126,6 +126,34 @@ _EKF_CONST    = 0x080   # constant-position mode (no horiz pos)
 _EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
 
 
+def wait_ekf_z_stable(conn, threshold=0.5, timeout=90):
+    """ARM 전에 EKF z가 baro drift에서 0으로 수렴할 때까지 대기.
+
+    UWB VISION_POSITION_ESTIMATE가 z≈0을 주입하면 EKF z가 서서히 수렴함.
+    |z| < threshold 가 되면 NAV_TAKEOFF alt=1.0m이 정상 동작함.
+    """
+    flog(f"Waiting for EKF z to converge (|z| < {threshold}m)...")
+    last_log = 0.0
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        msg = conn.recv_match(
+            type='LOCAL_POSITION_NED', blocking=True, timeout=1.0
+        )
+        if msg is None:
+            continue
+        z = msg.z
+        _tset(ned_x=msg.x, ned_y=msg.y, ned_z=z)
+        now = time.time()
+        if now - last_log > 3.0:
+            flog(f"  EKF z={z:.3f}m  (need |z| < {threshold}m)")
+            last_log = now
+        if abs(z) < threshold:
+            flog(f"EKF z stable: z={z:.3f}m  baro drift cancelled")
+            return True
+    flog(f"EKF z timeout — z={msg.z:.3f}m still drifted, proceeding anyway")
+    return False
+
+
 def wait_ready(conn, timeout=15):
     flog("Waiting for EKF...")
     deadline = time.time() + timeout
@@ -452,6 +480,7 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
+        wait_ekf_z_stable(conn)
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
