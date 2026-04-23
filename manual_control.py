@@ -273,7 +273,8 @@ def hold(conn, x, y, z, duration, uwb=None):
 
 
 def takeoff(conn, alt=TAKEOFF_ALT):
-    """Climb alt meters using SET_POSITION_TARGET (relative to current z).
+    """Takeoff hybrid: NAV_TAKEOFF triggers motor spin-up (overcomes land
+    detector), then position setpoints take over for precise altitude control.
     Returns (x, y, z) of hover position, or None on failure.
     """
     flog("TAKEOFF: reading ground position...")
@@ -287,22 +288,33 @@ def takeoff(conn, alt=TAKEOFF_ALT):
         flog("TAKEOFF FAILED: no LOCAL_POSITION_NED")
         return None
 
-    hold_x  = ground.x
-    hold_y  = ground.y
-    start_z = ground.z
-    target_z   = start_z - alt
-    threshold  = start_z - (alt - TOLERANCE)
+    hold_x   = ground.x
+    hold_y   = ground.y
+    start_z  = ground.z
+    target_z  = start_z - alt
+    threshold = start_z - (alt - TOLERANCE)
+
+    # NAV_TAKEOFF with large alt so FC always tries to climb regardless of baro
+    nav_alt = abs(start_z) + alt + 5.0
+    conn.mav.command_long_send(
+        conn.target_system, conn.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, float('nan'), 0, 0, nav_alt,
+    )
     _tset(phase='takeoff', takeoff_start_z=start_z, takeoff_target_z=threshold)
     flog(
         f"TAKEOFF: start=({hold_x:.2f},{hold_y:.2f},{start_z:.2f})  "
-        f"target_z={target_z:.2f}m  threshold={threshold:.2f}m"
+        f"target_z={target_z:.2f}m  nav_alt={nav_alt:.1f}m (motor trigger)"
     )
 
-    last_log = 0.0
+    motors_on  = False
+    last_log   = 0.0
     last_servo = 0.0
-    deadline = time.time() + alt / CLIMB_RATE * 5
+    deadline   = time.time() + alt / CLIMB_RATE * 5
     while time.time() < deadline:
-        send_position(conn, hold_x, hold_y, target_z)
+        if motors_on:
+            # override NAV_TAKEOFF with precise position setpoint
+            send_position(conn, hold_x, hold_y, target_z)
         msg = conn.recv_match(
             type=['LOCAL_POSITION_NED', 'SERVO_OUTPUT_RAW', 'HEARTBEAT'],
             blocking=True, timeout=0.5,
@@ -318,14 +330,17 @@ def takeoff(conn, alt=TAKEOFF_ALT):
                 _tset(phase='disarmed')
                 return None
         elif t == 'SERVO_OUTPUT_RAW':
-            _tset(servo=(msg.servo1_raw, msg.servo2_raw,
-                         msg.servo3_raw, msg.servo4_raw))
+            svs = (msg.servo1_raw, msg.servo2_raw,
+                   msg.servo3_raw, msg.servo4_raw)
+            _tset(servo=svs)
+            if not motors_on and any(v > 1100 for v in svs):
+                motors_on = True
+                flog("Motors spinning — switching to position setpoints")
             now2 = time.time()
             if now2 - last_servo > 2.0:
                 flog(
-                    f"SERVO: {msg.servo1_raw} {msg.servo2_raw}"
-                    f" {msg.servo3_raw} {msg.servo4_raw}"
-                    f" {'(motors off!)' if msg.servo1_raw <= 1000 else ''}"
+                    f"SERVO: {svs[0]} {svs[1]} {svs[2]} {svs[3]}"
+                    f" {'(motors off!)' if not motors_on else '(OK)'}"
                 )
                 last_servo = now2
         elif t == 'LOCAL_POSITION_NED':
@@ -333,7 +348,10 @@ def takeoff(conn, alt=TAKEOFF_ALT):
             now2 = time.time()
             if now2 - last_log > 1.0:
                 delta = start_z - msg.z
-                flog(f"  climbing: z={msg.z:.2f}m  Δ={delta:.2f}/{alt:.1f}m")
+                flog(
+                    f"  z={msg.z:.2f}m  Δ={delta:.2f}/{alt:.1f}m"
+                    f"  motors={'ON' if motors_on else 'OFF'}"
+                )
                 last_log = now2
             print(f"  z={msg.z:.2f}m", end="\r")
             if msg.z < threshold:
