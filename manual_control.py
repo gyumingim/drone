@@ -105,10 +105,11 @@ def send_global_origin(conn, lat=0.0, lon=0.0, alt=0.0):
 def request_streams(conn):
     """Ask ArduPilot to send EKF, position, attitude, servo streams."""
     streams = [
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,    # EKF_STATUS_REPORT
-        mavutil.mavlink.MAV_DATA_STREAM_POSITION,   # LOCAL_POSITION_NED
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,     # ATTITUDE
+        mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,      # EKF_STATUS_REPORT
+        mavutil.mavlink.MAV_DATA_STREAM_POSITION,    # LOCAL_POSITION_NED
+        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,      # ATTITUDE
         mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, # SERVO_OUTPUT_RAW
+        mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, # SCALED_PRESSURE
     ]
     for s in streams:
         conn.mav.request_data_stream_send(
@@ -118,6 +119,40 @@ def request_streams(conn):
     flog("Streams requested")
 
 
+_baro_ref = None  # hPa, reference pressure at ground (set by calibrate_baro)
+
+
+def _press_to_alt(hpa):
+    """ISA standard atmosphere: pressure (hPa) → absolute altitude (m)."""
+    return 44307.69 * (1.0 - (hpa / 1013.25) ** 0.190284)
+
+
+def baro_rel_alt(conn):
+    """Baro altitude above ground reference, positive = up (m). None if not calibrated."""
+    sp = getattr(conn, 'messages', {}).get('SCALED_PRESSURE')
+    if sp is None or _baro_ref is None:
+        return None
+    return _press_to_alt(sp.press_abs) - _press_to_alt(_baro_ref)
+
+
+def calibrate_baro(conn, samples=20, timeout=15):
+    """Average N SCALED_PRESSURE readings → store as ground reference."""
+    global _baro_ref
+    flog("Calibrating baro reference...")
+    readings = []
+    deadline = time.time() + timeout
+    while len(readings) < samples and time.time() < deadline:
+        msg = conn.recv_match(type='SCALED_PRESSURE', blocking=True, timeout=1.0)
+        if msg:
+            readings.append(msg.press_abs)
+    if not readings:
+        flog("Baro calibration FAILED — no SCALED_PRESSURE")
+        return False
+    _baro_ref = sum(readings) / len(readings)
+    flog(f"Baro ref: {_baro_ref:.2f} hPa ({len(readings)} samples) → z=0")
+    return True
+
+
 _EKF_ATT      = 0x001   # attitude
 _EKF_VEL_H    = 0x002   # horiz velocity
 _EKF_POS_REL  = 0x008   # horiz pos (relative)
@@ -125,57 +160,6 @@ _EKF_POS_ABS  = 0x010   # horiz pos (absolute)
 _EKF_CONST    = 0x080   # constant-position mode (no horiz pos)
 _EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
 
-
-def wait_ekf_z_stable(conn, uwb, threshold=0.5, ramp_rate=0.3, timeout=90):
-    """VISION z offset을 EKF z에서 0으로 서서히 걸어서 baro drift 상쇄.
-
-    EKF z = -16m이면 innovation gate가 UWB z=0을 거부함.
-    offset을 -16m에서 시작해 0.3m/s로 0을 향해 ramp하면 EKF가 따라옴.
-    """
-    # 현재 EKF z 읽기
-    ekf_z = None
-    for _ in range(10):
-        m = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1.0)
-        if m:
-            ekf_z = m.z
-            break
-    if ekf_z is None:
-        flog("EKF z ramp: no LOCAL_NED — skipping")
-        return False
-
-    if abs(ekf_z) < threshold:
-        flog(f"EKF z already stable: z={ekf_z:.3f}m — skipping ramp")
-        return True
-
-    flog(f"EKF z ramp: start={ekf_z:.2f}m → 0  rate={ramp_rate}m/s")
-    uwb.z_offset = ekf_z   # VISION z = UWB_real_z + offset ≈ EKF z (near)
-    last_log = 0.0
-    deadline = time.time() + timeout
-    dt = 0.1  # 100ms step
-
-    while time.time() < deadline:
-        # ramp offset toward 0
-        if uwb.z_offset > 0:
-            uwb.z_offset = max(0.0, uwb.z_offset - ramp_rate * dt)
-        else:
-            uwb.z_offset = min(0.0, uwb.z_offset + ramp_rate * dt)
-
-        m = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=0.2)
-        if m:
-            _tset(ned_x=m.x, ned_y=m.y, ned_z=m.z)
-            now = time.time()
-            if now - last_log > 2.0:
-                flog(f"  EKF z={m.z:.3f}m  offset={uwb.z_offset:.3f}m")
-                last_log = now
-            if abs(m.z) < threshold:
-                uwb.z_offset = 0.0
-                flog(f"EKF z stable: z={m.z:.3f}m  offset cancelled")
-                return True
-        time.sleep(dt)
-
-    uwb.z_offset = 0.0
-    flog(f"EKF z ramp timeout — proceeding anyway")
-    return False
 
 
 def wait_ready(conn, timeout=15):
@@ -504,7 +488,7 @@ def _flight(conn, uwb):
         flog("Setting GUIDED mode...")
         set_guided(conn)
         time.sleep(0.3)
-        wait_ekf_z_stable(conn, uwb)
+        calibrate_baro(conn)
         if not arm(conn):
             flog("[FLIGHT] ARM failed — aborting")
             return
@@ -762,7 +746,7 @@ def _heartbeat_loop(conn, stop_evt):
 
 def main():
     conn = connect()
-    uwb = UWBTag(conn)
+    uwb = UWBTag(conn, baro_getter=lambda: baro_rel_alt(conn))
     uwb.start()
 
     stop_hb = threading.Event()

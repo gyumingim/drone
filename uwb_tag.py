@@ -149,13 +149,13 @@ class UWBTag:
     conn: pymavlink connection for VISION injection (None = visualizer-only mode)
     """
 
-    def __init__(self, conn=None):
+    def __init__(self, conn=None, baro_getter=None):
         self.conn = conn
+        self._baro_getter = baro_getter  # callable() → float (m, up-positive) or None
         self._lock   = threading.RLock()
         self._stop   = threading.Event()
         self._thread = None
 
-        self.z_offset  = 0.0       # added to VISION z — ramp to cancel baro drift
         self._origin   = None      # (x, y, z) at first fix
         self._pos_rel  = None      # (dx, dy, dz) relative to origin
         self._pos_abs  = None      # (x, y, z) absolute UWB frame
@@ -205,7 +205,10 @@ class UWBTag:
     def _inject_vision(self, x, y, z):
         if self.conn is None:
             return
-        z = z + self.z_offset
+        if self._baro_getter is not None:
+            baro_up = self._baro_getter()
+            if baro_up is not None:
+                z = -baro_up  # baro up-positive → NED negative-up
         # covariance: upper-triangle of 6x6 (pos x,y,z + rot r,p,y)
         # indices 0,6,11 = position variances; 15,18,20 = angle variances
         cov = [0.0] * 21
