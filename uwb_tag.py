@@ -24,14 +24,15 @@ from scipy.optimize import least_squares
 UWB_PORT   = '/dev/ttyUSB0'
 UWB_BAUD   = 115200
 TRAIL_LEN  = 80
-UWB_QF_MIN = 60   # firmware QF threshold (0-100)
+UWB_QF_MIN = 40   # firmware QF threshold (0-100)
 
 COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12',
           '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
 
 
 # ── parser ───────────────────────────────────────────────────────────────────
-# les format: 'ID[ax,ay,az]=dist ... le_us=N est[x,y,z,qf]'
+# les format:  'ID[ax,ay,az]=dist ... le_us=N est[x,y,z,qf]'
+# DIST format: 'DIST,N,AN0,id,ax,ay,az,dist,...,POS,x,y,z,qf'
 
 _RE_ANCHOR = re.compile(
     r'([0-9A-Fa-f]+)\[([-\d.]+),([-\d.]+),([-\d.]+)\]=([\d.]+)'
@@ -61,6 +62,47 @@ def parse_les(line: str):
         fw_pos = (float(m.group(1)), float(m.group(2)),
                   float(m.group(3)), int(m.group(4)))
     return anchor_info, fw_pos
+
+
+def parse_dist(line: str):
+    """
+    DIST,<N>,AN0,<id>,<ax>,<ay>,<az>,<dist>,...,POS,<x>,<y>,<z>,<qf>
+    Returns (anchor_info, fw_pos) or (None, None).
+    """
+    if not line.startswith('DIST,'):
+        return None, None
+    parts = line.split(',')
+    try:
+        n = int(parts[1])
+        anchor_info = {}
+        idx = 2
+        for _ in range(n):
+            # ANx, id, ax, ay, az, dist
+            aid = parts[idx + 1].upper()
+            ax = float(parts[idx + 2])
+            ay = float(parts[idx + 3])
+            az = float(parts[idx + 4])
+            dist = float(parts[idx + 5])
+            anchor_info[aid] = {'pos': (ax, ay, az), 'dist_m': dist}
+            idx += 6
+        fw_pos = None
+        if idx < len(parts) and parts[idx] == 'POS':
+            x = float(parts[idx + 1])
+            y = float(parts[idx + 2])
+            z = float(parts[idx + 3])
+            qf = int(parts[idx + 4])
+            fw_pos = (x, y, z, qf)
+        return anchor_info, fw_pos
+    except (ValueError, IndexError):
+        return None, None
+
+
+def parse_line(line: str):
+    """Try DIST format first, then les format."""
+    anchor_info, fw_pos = parse_dist(line)
+    if anchor_info:
+        return anchor_info, fw_pos
+    return parse_les(line)
 
 
 # ── trilateration ─────────────────────────────────────────────────────────────
@@ -220,18 +262,15 @@ class UWBTag:
                         if not raw or raw in ('dwm>', 'les', 'lec', 'lep'):
                             continue
 
+                        # any real data line resets the no-stream timer
+                        last_data = time.time()
                         rx += 1
-                        if '[' in raw and ']=' in raw:
-                            if rx <= 5:
-                                print(f"[LES #{rx}] {raw!r}")
-                        elif rx <= 5:
+                        if rx <= 5:
                             print(f"[RAW #{rx:02d}] {raw!r}")
 
-                        anchor_info, fw_pos = parse_les(raw)
+                        anchor_info, fw_pos = parse_line(raw)
                         if not anchor_info:
                             continue
-
-                        last_data = time.time()
                         ok += 1
 
                         if fw_pos and fw_pos[3] < UWB_QF_MIN:
