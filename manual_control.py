@@ -399,58 +399,79 @@ def land(conn):
 
 def debug_status(conn, uwb, duration=15):
     """Print live debug for EKF, UWB, and position for `duration` seconds."""
-    print("\n" + "="*55)
+    msgs = getattr(conn, 'messages', {})
+    print("\n" + "="*60)
     print(f"DEBUG MODE — watching for {duration}s")
-    print("="*55)
+    print("="*60)
     deadline = time.time() + duration
     while time.time() < deadline:
-        ekf = conn.recv_match(
-            type='EKF_STATUS_REPORT', blocking=False
-        )
-        pos = conn.recv_match(
-            type='LOCAL_POSITION_NED', blocking=False
-        )
+        # drain pending messages into conn.messages
+        for _ in range(20):
+            if conn.recv_match(blocking=False) is None:
+                break
+
+        ekf  = msgs.get('EKF_STATUS_REPORT')
+        pos  = msgs.get('LOCAL_POSITION_NED')
+        srv  = msgs.get('SERVO_OUTPUT_RAW')
+        hb   = msgs.get('HEARTBEAT')
         drone_pos = uwb.get_drone_pos()
         tags = uwb.get_tags()
-        uwb_ok = drone_pos is not None
         vision_sent = getattr(uwb, '_dbg_cnt', 0)
 
-        print(
-            f"  UWB: {'OK' if uwb_ok else 'NO DATA':7s}"
-            f"  tags={len(tags)}"
-            f"  vision_sent={vision_sent:4d}"
-        )
+        # ── armed / mode ─────────────────────────────────────────
+        if hb:
+            armed = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            print(f"  Armed: {'ARMED  ' if armed else 'disarmed'}  mode={hb.custom_mode}")
+
+        # ── UWB ──────────────────────────────────────────────────
+        uwb_ok = drone_pos is not None
+        print(f"  UWB:  {'OK' if uwb_ok else 'NO DATA':7s}  tags={len(tags)}"
+              f"  vision_sent={vision_sent:4d}")
         if drone_pos:
-            print(
-                f"  UWB pos: x={drone_pos[0]:.2f}"
-                f"  y={drone_pos[1]:.2f}"
-                f"  z={drone_pos[2]:.2f}"
-            )
+            print(f"  UWB pos:   x={drone_pos[0]:+.3f}  y={drone_pos[1]:+.3f}"
+                  f"  z={drone_pos[2]:+.3f}")
+
+        # ── baro ─────────────────────────────────────────────────
+        sp = msgs.get('SCALED_PRESSURE')
+        if sp:
+            baro_alt = baro_rel_alt(conn)
+            baro_str = (f"{baro_alt:+.3f}m  VISION_z={-baro_alt:+.3f}m"
+                        if baro_alt is not None else "not calibrated")
+            print(f"  Baro:      {sp.press_abs:.2f} hPa  rel={baro_str}")
+        else:
+            print("  Baro:      no SCALED_PRESSURE")
+
+        # ── EKF ──────────────────────────────────────────────────
         if ekf:
             b = ekf.flags
-            print(
-                f"  EKF flags={b:#06x}"
-                f"  att={bool(b&_EKF_ATT)}"
-                f"  vel={bool(b&_EKF_VEL_H)}"
-                f"  pos_rel={bool(b&_EKF_POS_REL)}"
-                f"  pos_abs={bool(b&_EKF_POS_ABS)}"
-                f"  const={bool(b&_EKF_CONST)}"
-            )
+            print(f"  EKF:       flags={b:#06x}"
+                  f"  att={bool(b&_EKF_ATT)}"
+                  f"  vel={bool(b&_EKF_VEL_H)}"
+                  f"  pos_rel={bool(b&_EKF_POS_REL)}"
+                  f"  pos_abs={bool(b&_EKF_POS_ABS)}"
+                  f"  const={bool(b&_EKF_CONST)}")
+
+        # ── LOCAL_NED ─────────────────────────────────────────────
         if pos:
-            print(
-                f"  LOCAL_NED: x={pos.x:.2f}"
-                f"  y={pos.y:.2f}"
-                f"  z={pos.z:.2f}"
-            )
+            drift = "  ← BARO DRIFT!" if abs(pos.z) > 1.0 else ""
+            print(f"  LOCAL_NED: x={pos.x:+.3f}  y={pos.y:+.3f}"
+                  f"  z={pos.z:+.3f}{drift}")
+
+        # ── SERVO ─────────────────────────────────────────────────
+        if srv:
+            s = (srv.servo1_raw, srv.servo2_raw, srv.servo3_raw, srv.servo4_raw)
+            on = any(v > 1050 for v in s)
+            print(f"  SERVO:     {s[0]:4d} {s[1]:4d} {s[2]:4d} {s[3]:4d}"
+                  f"  {'MOTORS ON' if on else 'motors off'}")
+
+        # ── drift ─────────────────────────────────────────────────
         if pos and drone_pos:
             dx = drone_pos[0] - pos.x
             dy = drone_pos[1] - pos.y
             dz = drone_pos[2] - pos.z
-            print(
-                f"  DRIFT  Δx={dx:+.3f}  Δy={dy:+.3f}  Δz={dz:+.3f}"
-                f"  (UWB - EKF, 작을수록 정렬됨)"
-            )
-        print("-"*55)
+            print(f"  DRIFT:     Δx={dx:+.3f}  Δy={dy:+.3f}  Δz={dz:+.3f}")
+
+        print("-"*60)
         time.sleep(1.0)
 
 
