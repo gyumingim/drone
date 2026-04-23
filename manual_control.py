@@ -91,6 +91,49 @@ def connect(port=FC_PORT, baud=FC_BAUD):
     raise RuntimeError("FC not found on any ACM port")
 
 
+def ensure_fresh_ekf(port=FC_PORT, baud=FC_BAUD):
+    """Connect, ensure EK3_SRC1_POSZ=6, reboot if param wrong or baro drifted."""
+    conn = connect(port, baud)
+
+    # read EK3_SRC1_POSZ
+    conn.mav.param_request_read_send(
+        conn.target_system, conn.target_component, b'EK3_SRC1_POSZ', -1)
+    p = conn.recv_match(type='PARAM_VALUE', blocking=True, timeout=5)
+    posz = int(p.param_value) if p else -1
+    print(f"[INIT] EK3_SRC1_POSZ = {posz}")
+
+    # read current baro z
+    conn.mav.request_data_stream_send(
+        conn.target_system, conn.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1)
+    pos = conn.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=3)
+    z = pos.z if pos else 0.0
+    print(f"[INIT] LOCAL_NED z = {z:.2f}m")
+
+    needs_reboot = (posz != 6) or (abs(z) > 2.0)
+
+    if needs_reboot:
+        if posz != 6:
+            print(f"[INIT] Setting EK3_SRC1_POSZ 6...")
+            conn.mav.param_set_send(
+                conn.target_system, conn.target_component,
+                b'EK3_SRC1_POSZ', 6.0,
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+            time.sleep(1.0)
+        print(f"[INIT] Rebooting FC (posz={posz}, z={z:.1f}m)...")
+        conn.mav.command_long_send(
+            conn.target_system, conn.target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+            0, 1, 0, 0, 0, 0, 0, 0)
+        time.sleep(14)
+        conn = connect(port, baud)
+        print("[INIT] FC reboot complete")
+    else:
+        print(f"[INIT] EK3_SRC1_POSZ=6 OK, z={z:.2f}m — no reboot needed")
+
+    return conn
+
+
 def send_global_origin(conn, lat=0.0, lon=0.0, alt=0.0):
     """EKF local frame origin — dummy value OK for indoor ExternalNav."""
     conn.mav.set_gps_global_origin_send(
@@ -766,7 +809,7 @@ def _heartbeat_loop(conn, stop_evt):
 
 
 def main():
-    conn = connect()
+    conn = ensure_fresh_ekf()
     uwb = UWBTag(conn, baro_getter=lambda: baro_rel_alt(conn))
     uwb.start()
 
