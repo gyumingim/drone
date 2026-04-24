@@ -24,7 +24,7 @@ Pixhawk 6C Mini + GrowSpace UWB Listener
 | `EK3_SRC1_POSZ` | `6` | 수직 위치 = ExternalNav (UWB) |
 | `EK3_SRC1_VELXY` | `0` | 수평 속도 = None |
 | `EK3_SRC1_VELZ` | `0` | 수직 속도 = None |
-| `EK3_SRC1_YAW` | `1` | Yaw = Compass |
+| `EK3_SRC1_YAW` | `6` | Yaw = ExternalNav (VISION_POSITION_ESTIMATE) |
 | `VISO_TYPE` | `1` | Visual Odometry 활성화 (VISION 메시지 수신) |
 
 ---

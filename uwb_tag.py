@@ -163,6 +163,7 @@ class UWBTag:
         self._trail    = deque(maxlen=TRAIL_LEN)
         self._ts       = 0.0
         self._dbg_cnt  = 0
+        self._ekf_yaw  = 0.0      # updated by flight thread via set_yaw()
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -173,6 +174,10 @@ class UWBTag:
 
     def stop(self):
         self._stop.set()
+
+    def set_yaw(self, yaw_rad: float) -> None:
+        with self._lock:
+            self._ekf_yaw = yaw_rad
 
     def get_drone_pos(self):
         """Returns (x, y, z) relative to origin (ENU), or None."""
@@ -214,8 +219,10 @@ class UWBTag:
         cov[18] = 0.1    # pitch variance
         cov[20] = 0.1    # yaw variance
         ts = int(time.time() * 1e6)  # microseconds, as reference impl does
+        with self._lock:
+            yaw = self._ekf_yaw
         self.conn.mav.vision_position_estimate_send(
-            ts, x, y, z, 0.0, 0.0, 0.0, cov, 0,
+            ts, x, y, z, 0.0, 0.0, yaw, cov, 0,
         )
         self._dbg_cnt += 1
         if self._dbg_cnt % 10 == 0:
