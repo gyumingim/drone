@@ -1,0 +1,5 @@
+pymavlink==2.4.49
+matplotlib==3.5.1
+numpy==1.26.4
+scipy==1.8.0
+pyserial==3.5
