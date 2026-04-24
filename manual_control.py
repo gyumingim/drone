@@ -259,6 +259,9 @@ def hold(conn, x, y, z, duration, uwb=None):
     deadline = time.time() + duration
     while time.time() < deadline:
         send_position(conn, x, y, z)
+        att = conn.recv_match(type='ATTITUDE', blocking=False)
+        if att and uwb is not None:
+            uwb.set_yaw(att.yaw)
         if uwb is not None:
             tags = uwb.get_tags()
             stale = tags and all(
@@ -693,14 +696,6 @@ def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
         )
 
 
-def _attitude_loop(conn, uwb, stop_evt):
-    """Read ATTITUDE from FC and forward yaw to UWB vision injector."""
-    while not stop_evt.is_set():
-        msg = conn.recv_match(type='ATTITUDE', blocking=True, timeout=0.5)
-        if msg:
-            uwb.set_yaw(msg.yaw)
-
-
 def _heartbeat_loop(conn, stop_evt):
     """Send GCS heartbeat every 1s so ArduPilot knows we're alive."""
     while not stop_evt.is_set():
@@ -723,9 +718,6 @@ def main():
     stop_hb = threading.Event()
     hb = threading.Thread(target=_heartbeat_loop, args=(conn, stop_hb), daemon=True)
     hb.start()
-
-    att = threading.Thread(target=_attitude_loop, args=(conn, uwb, stop_hb), daemon=True)
-    att.start()
 
     ft = threading.Thread(target=_flight, args=(conn, uwb), daemon=True)
     ft.start()
