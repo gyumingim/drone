@@ -295,26 +295,29 @@ class UWBTag:
                         if not all(math.isfinite(v) for v in pos):
                             continue
 
-                        x, y, z = pos
+                        x, y, _ = pos
+                        # fw_pos z is reliable at all heights;
+                        # trilateration z breaks once drone rises above lowest anchor
+                        z_abs = fw_pos[2] if fw_pos else pos[2]
                         now = time.time()
 
                         with self._lock:
-                            self._pos_abs = (x, y, z)
+                            self._pos_abs = (x, y, z_abs)
                             self._fw_pos  = fw_pos
                             self._ts      = now
                             self._trail.append((x, y))
                             self._anchors = anchor_info
 
                             if self._origin is None:
-                                self._origin = (x, y, z)
+                                self._origin = (x, y, z_abs)
                                 print(f"[UWB] origin locked: "
-                                      f"({x:.2f},{y:.2f},{z:.2f})")
+                                      f"({x:.2f},{y:.2f},{z_abs:.2f})")
                                 self._send_global_origin()
 
                             ox, oy, oz = self._origin
                             rel_x = x - ox
                             rel_y = y - oy
-                            rel_z = -(z - oz)
+                            rel_z = -(z_abs - oz)
                             self._pos_rel = (rel_x, rel_y, rel_z)
 
                         self._inject_vision(rel_x, rel_y, rel_z)
@@ -326,8 +329,9 @@ class UWBTag:
                                   if fw_pos else "fw=N/A")
                             print(f"[UWB] rx={rx} ok={ok} "
                                   f"anchors={len(anchor_info)} "
-                                  f"trilat=({x:.2f},{y:.2f},{z:.2f}) "
-                                  f"height={-z:.2f}m  {fw}")
+                                  f"trilat_xy=({x:.2f},{y:.2f}) "
+                                  f"trilat_z={pos[2]:.2f} fw_z={z_abs:.2f} "
+                                  f"height={-z_abs:.2f}m  {fw}")
                             last_stat = now2
 
             except serial.SerialException as e:
