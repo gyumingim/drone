@@ -78,7 +78,8 @@ def _tset(**kw) -> None:
 # ── flight control ───────────────────────────────────────────────────────────
 
 def connect(port=FC_PORT, baud=FC_BAUD):
-    candidates = [port, '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2']
+    candidates = [port, '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2',
+                  '/dev/ttyUSB1', '/dev/ttyUSB2']
     for p in dict.fromkeys(candidates):  # deduplicate, preserve order
         try:
             print(f"Trying {p}...")
