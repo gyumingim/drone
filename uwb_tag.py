@@ -110,7 +110,7 @@ def parse_line(line: str):
 def trilaterate_z_constrained(anchor_info: dict) -> tuple | None:
     """
     anchor_info: {anchor_id: {'pos': (ax,ay,az), 'dist_m': float}}
-    Returns (x, y, z) with z guaranteed below all anchor heights.
+    Returns (x, y, z) with z >= 0 (drone is always above floor).
     """
     pts = np.array([v['pos']   for v in anchor_info.values()])
     dst = np.array([v['dist_m'] for v in anchor_info.values()])
@@ -120,20 +120,16 @@ def trilaterate_z_constrained(anchor_info: dict) -> tuple | None:
 
     x0 = float(np.mean(pts[:, 0]))
     y0 = float(np.mean(pts[:, 1]))
-    # start well below anchors → least_squares converges to the lower root
-    z0 = float(np.min(pts[:, 2])) - 1.5
+    z0 = float(np.max(pts[:, 2])) + 1.0  # start above anchors
 
     def residuals(p):
         return np.linalg.norm(pts - p, axis=1) - dst
 
-    r = least_squares(residuals, [x0, y0, z0], method='lm')
+    # z >= 0: 드론은 항상 바닥 위, 지하 거울해 차단
+    r = least_squares(residuals, [x0, y0, z0], method='trf',
+                      bounds=([-np.inf, -np.inf, 0.0],
+                               [ np.inf,  np.inf, np.inf]))
     x, y, z = r.x
-
-    # safety clamp: if solver drifted above anchors, mirror it down
-    anchor_z_min = float(np.min(pts[:, 2]))
-    if z > anchor_z_min:
-        z = anchor_z_min - abs(z - anchor_z_min)
-
     return float(x), float(y), float(z)
 
 
@@ -301,19 +297,10 @@ class UWBTag:
                             continue
 
                         x, y, _ = pos
-                        # z: fw_pos only (DWM z-up: positive = above floor).
-                        # Trilateration z finds the underground mirror solution
-                        # once the drone rises above the lowest anchor.
-                        # Cache fw_pos z for up to 2 s to tolerate brief gaps.
-                        if fw_pos is not None:
-                            self._last_fw_z    = fw_pos[2]
-                            self._last_fw_z_ts = now
-                            z_abs = fw_pos[2]
-                        elif (self._last_fw_z is not None
-                              and now - self._last_fw_z_ts < 2.0):
-                            z_abs = self._last_fw_z
-                        else:
-                            continue  # no reliable z — skip VISION injection
+                        # z: trilateration (z>=0 bound enforces upper solution).
+                        # fw_pos z is unreliable when all anchors are below the
+                        # drone — DWM firmware finds the same mirror solution.
+                        z_abs = pos[2]   # guaranteed >= 0 by least_squares bound
                         now = time.time()
 
                         with self._lock:
