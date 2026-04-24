@@ -814,7 +814,6 @@ def main():
     uwb = UWBTag(conn)
     uwb.start()
 
-    send_global_origin(conn)
     request_streams(conn)
 
     stop_hb = threading.Event()

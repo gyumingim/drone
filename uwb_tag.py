@@ -343,20 +343,10 @@ class UWBTag:
     def _send_global_origin(self):
         if self.conn is None:
             return
-        # lat=0 lon=0 alt=0 — dummy indoor origin
-        self.conn.mav.set_gps_global_origin_send(
-            self.conn.target_system, 0, 0, 0,
-        )
-        # also send SET_HOME_POSITION — required by some FC builds
-        self.conn.mav.set_home_position_send(
-            self.conn.target_system,
-            0, 0, 0,        # lat, lon, alt (int32 * 1e7 / mm)
-            0.0, 0.0, 0.0,  # local NED position
-            [1, 0, 0, 0],   # quaternion (identity)
-            0.0, 0.0, 0.0,  # approach vector
-            int(time.time() * 1e3),
-        )
-        print("[UWB] global origin + home position sent")
+        # 실내 ExternalNav: SET_GPS_GLOBAL_ORIGIN / SET_HOME_POSITION 미전송.
+        # 잘못된 lat/lon/alt(0,0,0)을 보내면 기압계 기준 고도가 1000m+
+        # 오차로 뒤틀려 EKF z가 엉망이 됨.  ArduPilot 부팅 시 자체 초기화에 맡김.
+        print("[UWB] origin locked (global origin 전송 생략 — 실내 모드)")
 
 
 # ── standalone visualizer ─────────────────────────────────────────────────────
