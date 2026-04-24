@@ -235,7 +235,7 @@ class UWBTag:
         rx = ok = 0
         last_stat = time.time()
         NO_DATA_TIMEOUT = 3.0   # seconds before falling back to les polling
-        POLL_HZ = 5
+        LES_RESEND = 2.0        # re-send les only if stream dies
 
         while not self._stop.is_set():
             try:
@@ -256,8 +256,10 @@ class UWBTag:
                             time.sleep(0.1)
                             ser.reset_input_buffer()
                             polling = True
+                            last_poll = 0.0
 
-                        if polling and now - last_poll >= 1.0 / POLL_HZ:
+                        # les starts a continuous stream — only re-send if stream died
+                        if polling and now - last_data > LES_RESEND and now - last_poll >= LES_RESEND:
                             ser.write(b'les\r\n')
                             last_poll = now
 
