@@ -552,13 +552,14 @@ def _draw_fc_panel(ax, uwb):
         )
     lines.append("")
 
-    # UWB-EKF z drift
-    tags = uwb.get_tags()
-    if tags and ned_z is not None:
-        info = next(iter(tags.values()))
-        uwb_z = info['z']
-        dz    = uwb_z - ned_z
-        lines.append(f"UWB z={uwb_z:+.2f}m  EKF z={ned_z:+.2f}m  Δz={dz:+.2f}m")
+    # UWB-EKF z drift — compare in NED frame (negative = up)
+    drone_pos = uwb.get_drone_pos()   # (rel_x, rel_y, rel_z) NED
+    if drone_pos is not None and ned_z is not None:
+        dz = drone_pos[2] - ned_z     # both NED → meaningful diff
+        lines.append(
+            f"UWB z={drone_pos[2]:+.2f}  EKF z={ned_z:+.2f}  Δz={dz:+.3f}m"
+            f"  (NED: neg=up)"
+        )
 
     # color
     if start_z is not None and start_z < -(TAKEOFF_ALT - 0.2):
@@ -591,7 +592,7 @@ def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
         rows.append([
             tag_id,
             f"{info['x']:.2f}", f"{info['y']:.2f}",
-            f"{-info['z']:.2f}",
+            f"{info['z']:.2f}",
             str(info.get('qf', 0)), f"{age:.1f}s",
         ])
 

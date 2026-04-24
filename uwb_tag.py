@@ -156,14 +156,19 @@ class UWBTag:
         self._thread = None
 
         self._origin   = None      # (x, y, z) at first fix
-        self._pos_rel  = None      # (dx, dy, dz) relative to origin
-        self._pos_abs  = None      # (x, y, z) absolute UWB frame
+        self._pos_rel  = None      # (dx, dy, dz) relative to origin, NED (z neg=up)
+        self._pos_abs  = None      # (x, y, z) absolute UWB frame, z-up (z pos=up)
         self._anchors  = {}        # {id: {'pos': ..., 'dist_m': ...}} last batch
         self._fw_pos   = None      # (x, y, z, qf) firmware estimate
         self._trail    = deque(maxlen=TRAIL_LEN)
         self._ts       = 0.0
         self._dbg_cnt  = 0
         self._ekf_yaw  = 0.0      # updated by flight thread via set_yaw()
+        # fw_pos z cache: trilateration z is unreliable above anchor height,
+        # so we always use fw_pos z.  Keep the last good value for up to 2 s
+        # in case fw_pos is temporarily absent between ranging cycles.
+        self._last_fw_z: float | None = None
+        self._last_fw_z_ts: float = 0.0
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -296,9 +301,19 @@ class UWBTag:
                             continue
 
                         x, y, _ = pos
-                        # fw_pos z is reliable at all heights;
-                        # trilateration z breaks once drone rises above lowest anchor
-                        z_abs = fw_pos[2] if fw_pos else pos[2]
+                        # z: fw_pos only (DWM z-up: positive = above floor).
+                        # Trilateration z finds the underground mirror solution
+                        # once the drone rises above the lowest anchor.
+                        # Cache fw_pos z for up to 2 s to tolerate brief gaps.
+                        if fw_pos is not None:
+                            self._last_fw_z    = fw_pos[2]
+                            self._last_fw_z_ts = now
+                            z_abs = fw_pos[2]
+                        elif (self._last_fw_z is not None
+                              and now - self._last_fw_z_ts < 2.0):
+                            z_abs = self._last_fw_z
+                        else:
+                            continue  # no reliable z — skip VISION injection
                         now = time.time()
 
                         with self._lock:
@@ -331,7 +346,7 @@ class UWBTag:
                                   f"anchors={len(anchor_info)} "
                                   f"trilat_xy=({x:.2f},{y:.2f}) "
                                   f"trilat_z={pos[2]:.2f} fw_z={z_abs:.2f} "
-                                  f"height={-z_abs:.2f}m  {fw}")
+                                  f"height={z_abs:.2f}m  {fw}")
                             last_stat = now2
 
             except serial.SerialException as e:
@@ -378,9 +393,9 @@ def _update(frame, ax_info, ax_map, uwb):
         fw = info.get('fw_pos')
         fw_str = (f"fw:     ({fw[0]:+.3f}, {fw[1]:+.3f}, {fw[2]:+.3f}) qf={fw[3]}"
                   if fw else "fw:     N/A")
-        dz = abs(-info['z'] - (-fw[2])) if fw else 0.0
+        dz = abs(info['z'] - fw[2]) if fw else 0.0   # both z-up, no negation
         pos_lines = [
-            f"Trilat: ({info['x']:+.3f}, {info['y']:+.3f}, {-info['z']:+.3f}m)",
+            f"Trilat: ({info['x']:+.3f}, {info['y']:+.3f}, {info['z']:+.3f}m)",
             fw_str,
             f"ΔZ (trilat vs fw): {dz:.3f} m",
             f"Age:    {age:.2f} s",
@@ -433,7 +448,7 @@ def _update(frame, ax_info, ax_map, uwb):
                 markeredgewidth=1.5, zorder=10)
     ax_map.text(info['x'] + 0.1, info['y'] + 0.1,
                 f"({info['x']:.2f}, {info['y']:.2f})\n"
-                f"H={-info['z']:.2f}m",
+                f"H={info['z']:.2f}m",
                 fontsize=8, color=mc)
 
     all_x = [info['x']] + [v['pos'][0] for v in info['anchors'].values()]
