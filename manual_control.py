@@ -11,6 +11,7 @@ import threading
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pymavlink import mavutil
+from serial import SerialException
 from uwb_tag import UWBTag
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -80,13 +81,20 @@ def _tset(**kw) -> None:
 def connect(port=FC_PORT, baud=FC_BAUD):
     candidates = [port, '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2',
                   '/dev/ttyUSB1', '/dev/ttyUSB2']
-    for p in dict.fromkeys(candidates):  # deduplicate, preserve order
+    for p in dict.fromkeys(candidates):
         try:
             print(f"Trying {p}...")
             conn = mavutil.mavlink_connection(p, baud=baud)
-            conn.wait_heartbeat(timeout=3)
-            print(f"Connected on {p} (sysid={conn.target_system})")
-            return conn
+            # SiK 텔레메트리 라디오는 sysid=0 heartbeat를 먼저 보냄
+            # FC(sysid>0) heartbeat가 올 때까지 대기
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                hb = conn.recv_match(type='HEARTBEAT', blocking=True, timeout=2)
+                if hb and hb.get_srcSystem() > 0:
+                    conn.target_system = hb.get_srcSystem()
+                    conn.target_component = hb.get_srcComponent()
+                    print(f"Connected on {p} (sysid={conn.target_system})")
+                    return conn
         except Exception:
             pass
     raise RuntimeError("FC not found on any ACM port")
@@ -131,9 +139,12 @@ def wait_ready(conn, timeout=15):
     flog("Waiting for EKF...")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        msg = conn.recv_match(
-            type='EKF_STATUS_REPORT', blocking=True, timeout=2
-        )
+        try:
+            msg = conn.recv_match(type='EKF_STATUS_REPORT', blocking=True, timeout=2)
+        except SerialException as e:
+            flog(f"[CONN] serial error in wait_ready — {e}")
+            time.sleep(0.5)
+            continue
         if msg:
             bits = msg.flags
             _tset(ekf_flags=bits)
@@ -372,12 +383,13 @@ def debug_status(conn, uwb, duration=15):
     print("="*55)
     deadline = time.time() + duration
     while time.time() < deadline:
-        ekf = conn.recv_match(
-            type='EKF_STATUS_REPORT', blocking=False
-        )
-        pos = conn.recv_match(
-            type='LOCAL_POSITION_NED', blocking=False
-        )
+        try:
+            ekf = conn.recv_match(type='EKF_STATUS_REPORT', blocking=False)
+            pos = conn.recv_match(type='LOCAL_POSITION_NED', blocking=False)
+        except SerialException as e:
+            flog(f"[CONN] serial error in debug_status — {e}")
+            time.sleep(0.5)
+            continue
         drone_pos = uwb.get_drone_pos()
         tags = uwb.get_tags()
         uwb_ok = drone_pos is not None
