@@ -711,18 +711,17 @@ def _heartbeat_loop(conn, stop_evt):
 
 def monitor_mode(conn, uwb):
     """
-    Read-only monitor: prints UWB + FC sensor values every second.
+    Read-only monitor: UWB / Baro 섹션 분리 출력.
     No arming, no flight commands.  Ctrl-C to exit.
     """
+    import math
     print("=" * 60)
     print("  MONITOR MODE  (Ctrl-C to exit, no arming)")
     print("=" * 60)
 
-    # cache for non-blocking reads
     _ekf = _pos = _baro = _att = None
 
     while True:
-        # drain incoming messages (non-blocking, up to ~50 msgs)
         for _ in range(50):
             msg = conn.recv_match(
                 type=['EKF_STATUS_REPORT', 'LOCAL_POSITION_NED',
@@ -732,76 +731,76 @@ def monitor_mode(conn, uwb):
             if msg is None:
                 break
             t = msg.get_type()
-            if t == 'EKF_STATUS_REPORT': _ekf  = msg
+            if t == 'EKF_STATUS_REPORT':  _ekf  = msg
             elif t == 'LOCAL_POSITION_NED': _pos  = msg
-            elif t == 'VFR_HUD':            _baro = msg
-            elif t == 'ATTITUDE':           _att  = msg
+            elif t == 'VFR_HUD':           _baro = msg
+            elif t == 'ATTITUDE':          _att  = msg
 
-        drone_pos = uwb.get_drone_pos()   # NED relative (z neg=up)
+        drone_pos = uwb.get_drone_pos()
         tags      = uwb.get_tags()
         vision_n  = getattr(uwb, '_dbg_cnt', 0)
 
         ts = time.strftime('%H:%M:%S')
-        print(f"\n[{ts}] ─────────────────────────────────────────")
+        print(f"\n[{ts}]")
 
-        # ── UWB ──────────────────────────────────────────────────
+        # ══ UWB ══════════════════════════════════════════════════
+        print("  [ UWB ]")
         if drone_pos:
             rx, ry, rz = drone_pos
-            height = -rz   # NED→물리 고도 (양수)
-            print(f"  UWB  rel=({rx:+.3f}, {ry:+.3f}, {rz:+.3f})m"
-                  f"  height={height:.3f}m"
-                  f"  vision_sent={vision_n}")
+            uwb_h = -rz          # rel NED z → 물리 고도 (양수=위)
+            print(f"    고도(trilat) : {uwb_h:+.3f} m")
+            print(f"    rel x,y      : ({rx:+.3f}, {ry:+.3f}) m")
+            print(f"    vision 전송  : {vision_n} 회")
         else:
-            print(f"  UWB  NO DATA  vision_sent={vision_n}")
+            print(f"    NO DATA  (vision 전송: {vision_n} 회)")
 
         if tags:
             info = next(iter(tags.values()))
             fw = info.get('fw_pos')
             if fw:
-                print(f"  fw_pos=({fw[0]:.3f},{fw[1]:.3f},{fw[2]:.3f})"
-                      f"  qf={fw[3]}")
+                # fw_pos z 는 DWM 펌웨어 추정값 (앵커 배치 낮으면 음수로 틀림)
+                print(f"    fw_pos z     : {fw[2]:+.3f} m  (qf={fw[3]})")
             anchors = info.get('anchors', {})
-            anc_str = '  '.join(
-                f"{aid}={v['dist_m']:.2f}m"
-                for aid, v in sorted(anchors.items())
-            )
-            if anc_str:
-                print(f"  Anchors: {anc_str}")
+            for aid, v in sorted(anchors.items()):
+                ax, ay, az = v['pos']
+                print(f"    앵커 {aid}: 거리={v['dist_m']:.3f} m"
+                      f"  위치=({ax:.2f},{ay:.2f},{az:.2f})")
 
-        # ── EKF ──────────────────────────────────────────────────
+        # ══ BARO / EKF ═══════════════════════════════════════════
+        print("  [ BARO / EKF ]")
+        if _baro:
+            print(f"    기압계 고도  : {_baro.alt:+.3f} m  "
+                  f"(climb={_baro.climb:+.2f} m/s)")
+        else:
+            print("    기압계       : 데이터 없음")
+
+        if _pos:
+            ekf_h = -_pos.z      # NED z → 물리 고도
+            print(f"    EKF 고도     : {ekf_h:+.3f} m  (NED z={_pos.z:+.3f})")
+            print(f"    EKF x,y      : ({_pos.x:+.3f}, {_pos.y:+.3f}) m")
+        else:
+            print("    EKF 위치     : 데이터 없음")
+
         if _ekf:
             b = _ekf.flags
             ok = (b & _EKF_NEED) == _EKF_NEED
-            print(f"  EKF  {'READY' if ok else 'NOT READY':10s}"
-                  f"  att={bool(b&_EKF_ATT)}"
-                  f"  vel={bool(b&_EKF_VEL_H)}"
-                  f"  pos_rel={bool(b&_EKF_POS_REL)}"
-                  f"  pos_abs={bool(b&_EKF_POS_ABS)}"
+            print(f"    EKF 상태     : {'READY' if ok else 'NOT READY'}"
                   f"  ({b:#06x})")
-        else:
-            print("  EKF  waiting...")
 
-        # ── LOCAL_POSITION_NED ────────────────────────────────────
-        if _pos:
-            print(f"  NED  x={_pos.x:+.3f}  y={_pos.y:+.3f}"
-                  f"  z={_pos.z:+.3f}m  (neg=up)")
-
-        # ── Baro ─────────────────────────────────────────────────
-        if _baro:
-            print(f"  Baro alt={_baro.alt:.3f}m  climb={_baro.climb:+.2f}m/s")
-
-        # ── Attitude ──────────────────────────────────────────────
         if _att:
-            import math
-            print(f"  Att  roll={math.degrees(_att.roll):+.1f}°"
+            print(f"    자세         : roll={math.degrees(_att.roll):+.1f}°"
                   f"  pitch={math.degrees(_att.pitch):+.1f}°"
                   f"  yaw={math.degrees(_att.yaw):+.1f}°")
 
-        # ── UWB-EKF z drift ──────────────────────────────────────
+        # ══ 비교 ═════════════════════════════════════════════════
         if drone_pos and _pos:
-            dz = drone_pos[2] - _pos.z   # both NED
-            print(f"  Δz(UWB-EKF)={dz:+.4f}m"
-                  + ("  ← drift large!" if abs(dz) > 0.3 else ""))
+            uwb_h  = -drone_pos[2]
+            ekf_h  = -_pos.z
+            baro_h = _baro.alt if _baro else None
+            print("  [ 비교 ]")
+            print(f"    UWB고도={uwb_h:+.3f}  EKF고도={ekf_h:+.3f}"
+                  + (f"  Baro={baro_h:+.3f}" if baro_h is not None else ""))
+            print(f"    UWB-EKF Δz={uwb_h - ekf_h:+.4f} m")
 
         time.sleep(1.0)
 
