@@ -215,7 +215,7 @@ class UWBTag:
         cov[20] = 0.1    # yaw variance
         ts = int(time.time() * 1e6)  # microseconds, as reference impl does
         self.conn.mav.vision_position_estimate_send(
-            ts, x, y, z, 0.0, 0.0, 0.0, cov, 0,
+            ts, x, y, 0.0, 0.0, 0.0, 0.0, cov, 0,
         )
         self._dbg_cnt += 1
         if self._dbg_cnt % 10 == 0:
