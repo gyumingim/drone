@@ -67,6 +67,8 @@ _telem: dict = {
     'takeoff_target_z': None,
     'baro_alt': None,
     'yaw_rad': None,
+    'roll_rad': None,
+    'pitch_rad': None,
     'ts': 0.0,
 }
 _telem_lock = threading.Lock()
@@ -481,281 +483,366 @@ def _flight(conn, uwb):
 
 # ── visualization (main thread) ──────────────────────────────────────────────
 
-def _draw_fc_panel(ax, uwb):
+import math as _math
+
+
+def _draw_status(ax):
+    """Panel: ARM 상태, Phase, EKF 플래그 — 가장 중요한 패널."""
     ax.cla()
-    ax.set_title("FC Telemetry")
     ax.axis('off')
 
     with _telem_lock:
         t = dict(_telem)
 
-    lines = []
+    armed   = t.get('armed')
+    phase   = t.get('phase', 'init').upper()
+    mode    = t.get('mode') or '?'
+    ekf     = t.get('ekf_flags')
+    ned_z   = t.get('ned_z')
+    ned_x   = t.get('ned_x') or 0.0
+    ned_y   = t.get('ned_y') or 0.0
+    baro    = t.get('baro_alt')
+    yaw     = t.get('yaw_rad')
+    roll    = t.get('roll_rad')
+    pitch   = t.get('pitch_rad')
 
-    # phase / armed / mode
-    phase = t.get('phase', 'init')
-    armed = t.get('armed')
-    mode  = t.get('mode') or '?'
-    arm_str = 'ARMED' if armed else ('DISARMED' if armed is not None else '?')
-    lines.append(f"Phase : {phase.upper():<12}  Mode: {mode}")
-    lines.append(f"Armed : {arm_str}")
-    lines.append("")
-
-    # LOCAL_NED z — highlight baro drift
-    ned_z = t.get('ned_z')
-    ned_x = t.get('ned_x') or 0.0
-    ned_y = t.get('ned_y') or 0.0
-    if ned_z is not None:
-        drift = ned_z < -0.5
-        lines.append(
-            f"LOCAL_NED  x={ned_x:+.2f}  y={ned_y:+.2f}  z={ned_z:+.2f}m"
-            + ("  ← BARO DRIFT" if drift else "")
-        )
+    # ARM 배너
+    if armed:
+        bg_col = '#27ae60'; arm_txt = '● ARMED'
+    elif armed is False:
+        bg_col = '#c0392b'; arm_txt = '○ DISARMED'
     else:
-        lines.append("LOCAL_NED: waiting...")
-    lines.append("")
+        bg_col = '#7f8c8d'; arm_txt = '? UNKNOWN'
 
-    # takeoff progress
-    start_z  = t.get('takeoff_start_z')
-    target_z = t.get('takeoff_target_z')
-    if start_z is not None:
-        lines.append(f"Takeoff start_z  = {start_z:+.2f}m")
-        lines.append(f"        target_z = {target_z:+.2f}m"
-                     f"  (need Δ≥{TAKEOFF_ALT-TOLERANCE:.1f}m)")
-        if ned_z is not None:
-            delta = start_z - ned_z
-            pct   = max(0.0, min(delta / TAKEOFF_ALT, 1.0))
-            bar   = '█' * int(pct * 16) + '░' * (16 - int(pct * 16))
-            lines.append(f"        climbed  = {delta:.2f}/{TAKEOFF_ALT:.1f}m"
-                         f"  [{bar}]")
-        if start_z < -(TAKEOFF_ALT - 0.2):
-            lines.append("  !! start_z already below target — baro drift!")
-    lines.append("")
+    ax.set_facecolor(bg_col + '22')
+    ax.text(0.5, 0.97, arm_txt, transform=ax.transAxes,
+            ha='center', va='top', fontsize=22, fontweight='bold',
+            color=bg_col, family='monospace')
 
-    # SERVO
-    servo = t.get('servo')
-    if servo is not None:
-        motors_on = any(v > 1050 for v in servo)
-        lines.append(
-            f"SERVO: {servo[0]:4d} {servo[1]:4d} {servo[2]:4d} {servo[3]:4d}"
-            + ("" if motors_on else "  ← MOTORS OFF")
-        )
-    else:
-        lines.append("SERVO: waiting...")
-    lines.append("")
+    # Phase
+    _phase_color = {
+        'INIT': '#7f8c8d', 'ARMING': '#f39c12', 'ARMED': '#f39c12',
+        'TAKEOFF': '#3498db', 'HOVER': '#2ecc71', 'MISSION': '#9b59b6',
+        'LANDING': '#e67e22', 'DONE': '#27ae60',
+        'ARM_FAILED': '#e74c3c', 'DISARMED': '#e74c3c',
+    }
+    pc = _phase_color.get(phase, '#2c3e50')
+    ax.text(0.5, 0.80, f'PHASE: {phase}', transform=ax.transAxes,
+            ha='center', va='top', fontsize=13, color=pc, fontweight='bold')
+    ax.text(0.5, 0.71, f'MODE: {mode}', transform=ax.transAxes,
+            ha='center', va='top', fontsize=10, color='#2c3e50')
 
-    # EKF
-    ekf = t.get('ekf_flags')
+    # EKF 상태
     if ekf is not None:
         ok = (ekf & _EKF_NEED) == _EKF_NEED
-        lines.append(f"EKF: {'READY' if ok else 'NOT READY'}  ({ekf:#06x})")
-        lines.append(
-            f"  att={bool(ekf&_EKF_ATT)}"
-            f"  vel={bool(ekf&_EKF_VEL_H)}"
-            f"  pos_rel={bool(ekf&_EKF_POS_REL)}"
-            f"  pos_abs={bool(ekf&_EKF_POS_ABS)}"
-        )
-    lines.append("")
+        ec = '#27ae60' if ok else '#e74c3c'
+        ax.text(0.5, 0.63, '✓ EKF READY' if ok else '✗ EKF NOT READY',
+                transform=ax.transAxes, ha='center', va='top',
+                fontsize=11, color=ec, fontweight='bold')
+        flags = (f"  att={'✓' if ekf & _EKF_ATT else '✗'}"
+                 f"  vel={'✓' if ekf & _EKF_VEL_H else '✗'}"
+                 f"  pos_rel={'✓' if ekf & _EKF_POS_REL else '✗'}"
+                 f"  pos_abs={'✓' if ekf & _EKF_POS_ABS else '✗'}")
+        ax.text(0.5, 0.56, flags, transform=ax.transAxes,
+                ha='center', va='top', fontsize=8.5, family='monospace',
+                color=ec)
 
-    # UWB-EKF z drift — compare in NED frame (negative = up)
-    drone_pos = uwb.get_drone_pos()   # (rel_x, rel_y, rel_z) NED
-    if drone_pos is not None and ned_z is not None:
-        dz = drone_pos[2] - ned_z     # both NED → meaningful diff
-        lines.append(
-            f"UWB z={drone_pos[2]:+.2f}  EKF z={ned_z:+.2f}  Δz={dz:+.3f}m"
-            f"  (NED: neg=up)"
-        )
+    # 수치 정보
+    lines = ['']
+    if ned_z is not None:
+        lines.append(f"EKF 고도   : {-ned_z:+.3f} m")
+        lines.append(f"EKF x,y    : ({ned_x:+.2f}, {ned_y:+.2f}) m")
+    if baro is not None:
+        lines.append(f"Baro 고도  : {baro:+.3f} m")
+    if roll is not None:
+        lines.append(f"Roll/Pitch : {_math.degrees(roll):+.1f}° / "
+                     f"{_math.degrees(pitch):+.1f}°")
+    if yaw is not None:
+        lines.append(f"Yaw        : {_math.degrees(yaw):+.1f}°")
 
-    # color
-    if start_z is not None and start_z < -(TAKEOFF_ALT - 0.2):
-        col = '#c0392b'
-    elif ned_z is not None and ned_z < -0.5:
-        col = '#e67e22'
-    elif armed:
-        col = '#27ae60'
-    else:
-        col = '#2c3e50'
+    # 이륙 진행 바
+    start_z  = t.get('takeoff_start_z')
+    target_z = t.get('takeoff_target_z')
+    if start_z is not None and ned_z is not None:
+        delta = start_z - ned_z
+        pct   = max(0.0, min(delta / TAKEOFF_ALT, 1.0))
+        bar   = '█' * int(pct * 14) + '░' * (14 - int(pct * 14))
+        lines.append('')
+        lines.append(f"이륙 [{bar}]")
+        lines.append(f"     {delta:.2f} / {TAKEOFF_ALT:.1f} m")
 
-    ax.text(0.03, 0.97, '\n'.join(lines),
-            transform=ax.transAxes,
-            va='top', fontsize=8, family='monospace', color=col)
+    ax.text(0.05, 0.49, '\n'.join(lines), transform=ax.transAxes,
+            va='top', fontsize=9, family='monospace', color='#2c3e50')
 
 
-def _update(frame, ax_info, ax_map, ax_alt, ax_fc, ax_log, uwb):
-    now = time.time()
-    tags = uwb.get_tags()
-    stale = 1.0
+def _draw_map(ax, uwb):
+    """Panel: XY 맵 — UWB 위치, 앵커, yaw 화살표, EKF 위치."""
+    ax.cla()
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.4)
 
-    # ── UWB table ────────────────────────────────────────────────────────────
-    ax_info.cla()
-    ax_info.set_title("Tag status")
-    ax_info.axis('off')
+    with _telem_lock:
+        yaw   = _telem.get('yaw_rad')
+        ned_x = _telem.get('ned_x')
+        ned_y = _telem.get('ned_y')
 
-    rows = []
-    for tag_id, info in sorted(tags.items()):
-        age = now - info['ts']
-        rows.append([
-            tag_id,
-            f"{info['x']:.2f}", f"{info['y']:.2f}",
-            f"{info['z']:.2f}",
-            str(info.get('qf', 0)), f"{age:.1f}s",
-        ])
-
-    if rows:
-        table = ax_info.table(
-            cellText=rows,
-            colLabels=['Tag ID', 'X (m)', 'Y (m)', 'Height (m)', 'QF', 'Age'],
-            loc='center', cellLoc='center',
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1.2, 2.0)
-        for i, (tag_id, _) in enumerate(sorted(tags.items())):
-            color = COLORS[i % len(COLORS)]
-            for j in range(6):
-                table[i + 1, j].set_facecolor(color + '33')
-    else:
-        ax_info.text(
-            0.5, 0.5, 'Waiting for UWB data...',
-            ha='center', va='center', fontsize=11, color='gray',
-            transform=ax_info.transAxes,
-        )
-
-    # ── XY map ───────────────────────────────────────────────────────────────
-    ax_map.cla()
-    ax_map.set_title("Tag position (XY)")
-    ax_map.set_xlabel("X (m)")
-    ax_map.set_ylabel("Y (m)")
-    ax_map.set_aspect('equal')
-    ax_map.grid(True, linestyle='--', alpha=0.4)
-
+    now   = time.time()
+    tags  = uwb.get_tags()
     all_x, all_y = [], []
+
     for i, (tag_id, info) in enumerate(sorted(tags.items())):
         color = COLORS[i % len(COLORS)]
-        fresh = (now - info['ts']) < stale
+        fresh = (now - info['ts']) < 1.0
         trail = info['trail']
 
+        # 이동 궤적
         if len(trail) > 1:
             tx, ty = zip(*trail)
-            ax_map.plot(tx, ty, '-', color=color, alpha=0.3, linewidth=1)
+            ax.plot(tx, ty, '-', color=color, alpha=0.3, linewidth=1)
 
+        # 드론 점
         mc = color if fresh else '#aaaaaa'
-        ax_map.plot(
-            info['x'], info['y'], 'o', color=mc,
-            markersize=12, markeredgecolor='white',
-            markeredgewidth=1.5, zorder=10,
-        )
-        ax_map.text(
-            info['x'] + 0.1, info['y'] + 0.1,
-            f"{tag_id}\nQF={info['qf']}", fontsize=8, color=mc,
-        )
-        # yaw 화살표: NED yaw (0=북/+x, 시계방향 양수)
-        with _telem_lock:
-            yaw = _telem.get('yaw_rad')
+        ax.plot(info['x'], info['y'], 'o', color=mc,
+                markersize=14, markeredgecolor='white',
+                markeredgewidth=2, zorder=10)
+
+        # yaw 화살표 (나침반 방향)
         if yaw is not None:
-            import math
-            arrow_len = 0.4
-            # NED: x=북, y=동 → matplotlib x=UWB_x(북), y=UWB_y(동)
-            dx = arrow_len * math.cos(yaw)   # NED x 성분
-            dy = arrow_len * math.sin(yaw)   # NED y 성분
-            ax_map.annotate(
-                '', xy=(info['x'] + dx, info['y'] + dy),
-                xytext=(info['x'], info['y']),
-                arrowprops=dict(arrowstyle='->', color='orange', lw=2),
-                zorder=11,
-            )
-            ax_map.text(
-                info['x'] + dx + 0.05, info['y'] + dy + 0.05,
-                f"{math.degrees(yaw):.0f}°", fontsize=8, color='orange',
-            )
+            L = 0.5
+            dx = L * _math.cos(yaw)
+            dy = L * _math.sin(yaw)
+            ax.annotate('',
+                        xy=(info['x'] + dx, info['y'] + dy),
+                        xytext=(info['x'], info['y']),
+                        arrowprops=dict(arrowstyle='->', color='#f39c12',
+                                        lw=2.5),
+                        zorder=12)
+            ax.text(info['x'] + dx * 1.3, info['y'] + dy * 1.3,
+                    f"{_math.degrees(yaw):.0f}°",
+                    fontsize=9, color='#f39c12', fontweight='bold',
+                    ha='center', va='center')
+
+        ax.text(info['x'] + 0.12, info['y'] - 0.28,
+                f"QF={info['qf']}", fontsize=8, color=mc)
         all_x.append(info['x'])
         all_y.append(info['y'])
 
+        # 앵커 위치 및 거리선
+        for aid, av in sorted(info.get('anchors', {}).items()):
+            apx, apy, apz = av['pos']
+            ax.plot(apx, apy, 's', color='#555555', markersize=10, zorder=5)
+            ax.text(apx + 0.1, apy + 0.1,
+                    f"{aid}\n({apx:.1f},{apy:.1f},z={apz:.1f})",
+                    fontsize=7, color='#555555')
+            ax.plot([info['x'], apx], [info['y'], apy],
+                    ':', color='#bbbbbb', linewidth=0.8, alpha=0.7)
+            mid_x = (info['x'] + apx) / 2
+            mid_y = (info['y'] + apy) / 2
+            ax.text(mid_x, mid_y, f"{av['dist_m']:.2f}m",
+                    fontsize=7, color='#888888', ha='center')
+            all_x.append(apx)
+            all_y.append(apy)
+
+    # EKF 위치 (파란 삼각형)
+    if ned_x is not None and ned_y is not None:
+        ax.plot(ned_x, ned_y, '^', color='#3498db', markersize=11,
+                markeredgecolor='white', markeredgewidth=1.5,
+                zorder=9, label='EKF')
+        all_x.append(ned_x)
+        all_y.append(ned_y)
+
     if all_x:
         m = 2.0
-        ax_map.set_xlim(min(all_x) - m, max(all_x) + m)
-        ax_map.set_ylim(min(all_y) - m, max(all_y) + m)
+        xl = min(all_x) - m;  xr = max(all_x) + m
+        yl = min(all_y) - m;  yr = max(all_y) + m
+        ax.set_xlim(xl, xr)
+        ax.set_ylim(yl, yr)
+        # 북쪽(+x) 기준 화살표
+        nx = xl + 0.3;  ny = yr - 0.5
+        ax.annotate('', xy=(nx + 0.5, ny), xytext=(nx, ny),
+                    arrowprops=dict(arrowstyle='->', color='#2c3e50', lw=1.5))
+        ax.text(nx + 0.55, ny, 'N(+x)', fontsize=8, color='#2c3e50',
+                va='center')
     else:
-        ax_map.text(
-            0.5, 0.5, 'Waiting for UWB data...',
-            ha='center', va='center', fontsize=11, color='gray',
-            transform=ax_map.transAxes,
-        )
+        ax.text(0.5, 0.5, 'UWB 데이터 없음', ha='center', va='center',
+                fontsize=11, color='gray', transform=ax.transAxes)
 
-    # ── altitude graph ───────────────────────────────────────────────────────
-    _draw_alt_panel(ax_alt)
+    if ned_x is not None:
+        ax.legend(fontsize=8, loc='lower right')
 
-    # ── FC telemetry ─────────────────────────────────────────────────────────
-    _draw_fc_panel(ax_fc, uwb)
-
-    # ── flight log ───────────────────────────────────────────────────────────
-    ax_log.cla()
-    ax_log.set_title("Flight log")
-    ax_log.axis('off')
-
-    with _flight_log_lock:
-        lines = list(_flight_log)
-
-    if lines:
-        # color-code by keyword
-        display = lines[-20:]
-        txt = '\n'.join(display)
-        last = display[-1].lower() if display else ''
-        if 'fail' in last or 'abort' in last or 'emergency' in last or 'disarm' in last:
-            color = '#e74c3c'
-        elif 'safety' in last or 'lost' in last or 'timeout' in last:
-            color = '#e67e22'
-        elif 'done' in last or 'complete' in last or 'ok' in last or 'ready' in last:
-            color = '#27ae60'
-        else:
-            color = '#2c3e50'
-        ax_log.text(
-            0.03, 0.97, txt,
-            transform=ax_log.transAxes,
-            va='top', fontsize=7.5, family='monospace', color=color,
-            wrap=True,
-        )
-    else:
-        ax_log.text(
-            0.5, 0.5, 'Waiting for flight events...',
-            ha='center', va='center', fontsize=10, color='gray',
-            transform=ax_log.transAxes,
-        )
+    yaw_str = f"{_math.degrees(yaw):.1f}°" if yaw is not None else "N/A"
+    ax.set_xlabel("X (m)  ← 나침반 북쪽")
+    ax.set_ylabel("Y (m)  ← 나침반 동쪽")
+    ax.set_title(f"UWB 위치 맵   yaw={yaw_str}")
 
 
-def _draw_alt_panel(ax):
+def _draw_altitude(ax):
+    """Panel: Baro / EKF / UWB 고도 시계열."""
     ax.cla()
+    ax.grid(True, linestyle='--', alpha=0.4)
+
     with _telem_lock:
-        hist = list(_alt_history)
+        hist     = list(_alt_history)
         cur_baro = _telem.get('baro_alt')
+        ned_z    = _telem.get('ned_z')
+
     if not hist:
-        ax.set_title("Altitude (m)")
-        ax.text(0.5, 0.5, 'Waiting for baro...',
+        ax.set_title("고도 (m)")
+        ax.text(0.5, 0.5, 'Baro 대기 중...',
                 ha='center', va='center', transform=ax.transAxes,
                 color='gray', fontsize=10)
         return
-    now = time.time()
+
+    now  = time.time()
     ts   = [h[0] - now for h in hist]
     baro = [h[1] for h in hist]
-    ekf  = [h[2] for h in hist]
-    ax.plot(ts, baro, color='#3498db', linewidth=1.5, label='Baro')
-    valid = [(t, e) for t, e in zip(ts, ekf) if e is not None]
-    if valid:
-        te, ve = zip(*valid)
+    ekfa = [h[2] for h in hist]
+    uwbh = [h[3] if len(h) > 3 else None for h in hist]
+
+    ax.plot(ts, baro, color='#3498db', linewidth=2, label='Baro')
+
+    vekf = [(t, e) for t, e in zip(ts, ekfa) if e is not None]
+    if vekf:
+        te, ve = zip(*vekf)
         ax.plot(te, ve, color='#e74c3c', linewidth=1.5,
                 linestyle='--', label='EKF')
+
+    vuwb = [(t, u) for t, u in zip(ts, uwbh) if u is not None]
+    if vuwb:
+        tu, vu = zip(*vuwb)
+        ax.plot(tu, vu, color='#2ecc71', linewidth=1.5,
+                linestyle=':', label='UWB')
+
     ax.legend(fontsize=8)
     ax.set_xlim(max(ts[0], -60), 2)
     ax.set_xlabel("time (s ago)")
     ax.set_ylabel("alt (m)")
-    ax.grid(True, linestyle='--', alpha=0.4)
-    title = "Altitude (m)"
+
+    parts = []
     if cur_baro is not None:
-        title += f"  Baro={cur_baro:+.2f}m"
-    ax.set_title(title)
+        parts.append(f"Baro={cur_baro:+.2f}m")
+    if ned_z is not None:
+        parts.append(f"EKF={-ned_z:+.2f}m")
+    ax.set_title("고도  " + "  ".join(parts))
 
 
-def _heartbeat_loop(conn, stop_evt):
-    """Send GCS heartbeat every 1s so ArduPilot knows we're alive."""
+def _draw_sensors(ax, uwb):
+    """Panel: 모터 PWM, 자세, UWB 앵커 거리 수치."""
+    ax.cla()
+    ax.axis('off')
+
+    with _telem_lock:
+        t = dict(_telem)
+
+    lines = ['─── 액추에이터 / 센서 ───', '']
+
+    # 모터 PWM 바
+    servo = t.get('servo')
+    if servo is not None:
+        lines.append('모터 PWM:')
+        for i, v in enumerate(servo):
+            pct = max(0.0, min((v - 1000) / 1000, 1.0))
+            bar = '█' * int(pct * 10) + '░' * (10 - int(pct * 10))
+            on  = v > 1050
+            lines.append(f"  M{i+1}: {v:4d} [{bar}] {'▲ON' if on else 'off'}")
+    else:
+        lines.append('모터: 대기 중')
+    lines.append('')
+
+    # 자세 (Roll / Pitch / Yaw)
+    roll  = t.get('roll_rad')
+    pitch = t.get('pitch_rad')
+    yaw   = t.get('yaw_rad')
+    if roll is not None:
+        lines.append('자세:')
+        for name, rad in [('Roll ', roll), ('Pitch', pitch), ('Yaw  ', yaw)]:
+            deg = _math.degrees(rad)
+            pct = (deg + 180) / 360
+            bar = '█' * int(pct * 10) + '░' * (10 - int(pct * 10))
+            lines.append(f"  {name}: {deg:+6.1f}° [{bar}]")
+    lines.append('')
+
+    # UWB 수치
+    drone_pos = uwb.get_drone_pos()
+    vision_n  = getattr(uwb, '_dbg_cnt', 0)
+    lines.append(f'VISION 전송: {vision_n}회')
+    if drone_pos:
+        rx, ry, rz = drone_pos
+        lines.append(f'UWB 높이  : {-rz:+.3f} m')
+        lines.append(f'UWB rel   : ({rx:+.2f}, {ry:+.2f})')
+    tags = uwb.get_tags()
+    if tags:
+        info = next(iter(tags.values()))
+        fw = info.get('fw_pos')
+        if fw:
+            lines.append(f'fw_pos z  : {fw[2]:+.3f}m  qf={fw[3]}')
+        lines.append('앵커 거리:')
+        for aid, av in sorted(info.get('anchors', {}).items()):
+            lines.append(f"  {aid}: {av['dist_m']:.3f} m")
+    lines.append('')
+
+    # EKF-UWB 드리프트
+    ned_x = t.get('ned_x') or 0.0
+    ned_y = t.get('ned_y') or 0.0
+    ned_z = t.get('ned_z')
+    if drone_pos and ned_z is not None:
+        dx = drone_pos[0] - ned_x
+        dy = drone_pos[1] - ned_y
+        dz = drone_pos[2] - ned_z
+        lines.append(f'EKF-UWB Δ:')
+        lines.append(f'  Δx={dx:+.3f} Δy={dy:+.3f} Δz={dz:+.3f}')
+
+    ax.text(0.03, 0.97, '\n'.join(lines),
+            transform=ax.transAxes, va='top',
+            fontsize=8.5, family='monospace', color='#2c3e50')
+
+
+def _draw_log(ax):
+    """Panel: 비행 로그 전체 — 줄별 색상 코딩."""
+    ax.cla()
+    ax.set_title("Flight Log")
+    ax.axis('off')
+
+    with _flight_log_lock:
+        lines = list(_flight_log)
+
+    if not lines:
+        ax.text(0.5, 0.5, '로그 대기 중...',
+                ha='center', va='center', fontsize=10, color='gray',
+                transform=ax.transAxes)
+        return
+
+    display = lines[-30:]
+    for i, line in enumerate(reversed(display)):
+        y = 0.97 - i * 0.032
+        ll = line.lower()
+        if any(k in ll for k in ('fail', 'abort', 'emergency', 'error')):
+            c = '#e74c3c'
+        elif any(k in ll for k in ('safety', 'lost', 'timeout', 'warn')):
+            c = '#e67e22'
+        elif any(k in ll for k in ('armed ok', 'takeoff complete', 'done',
+                                    'ready', 'mission')):
+            c = '#27ae60'
+        elif any(k in ll for k in ('arm', 'takeoff', 'climbing',
+                                    'landing', 'goto', '→')):
+            c = '#3498db'
+        else:
+            c = '#2c3e50'
+        ax.text(0.02, y, line, transform=ax.transAxes,
+                va='top', fontsize=7.5, family='monospace', color=c,
+                clip_on=True)
+
+
+def _update(frame, ax_status, ax_map, ax_alt, ax_sensor, ax_log, uwb):
+    _draw_status(ax_status)
+    _draw_map(ax_map, uwb)
+    _draw_altitude(ax_alt)
+    _draw_sensors(ax_sensor, uwb)
+    _draw_log(ax_log)
+
+
+def _heartbeat_loop(conn, stop_evt, uwb):
+    """Send GCS heartbeat every 1s and collect all telemetry for display."""
     while not stop_evt.is_set():
         try:
             conn.mav.heartbeat_send(
@@ -771,11 +858,15 @@ def _heartbeat_loop(conn, stop_evt):
                 _telem['baro_alt'] = msg.alt
                 ned_z = _telem.get('ned_z')
             ekf_alt = -ned_z if ned_z is not None else None
-            _alt_history.append((time.time(), msg.alt, ekf_alt))
+            drone_pos = uwb.get_drone_pos()
+            uwb_h = -drone_pos[2] if drone_pos else None
+            _alt_history.append((time.time(), msg.alt, ekf_alt, uwb_h))
         att = conn.recv_match(type='ATTITUDE', blocking=False)
         if att:
             with _telem_lock:
-                _telem['yaw_rad'] = att.yaw
+                _telem['yaw_rad']   = att.yaw
+                _telem['roll_rad']  = att.roll
+                _telem['pitch_rad'] = att.pitch
         time.sleep(1.0)
 
 
@@ -877,6 +968,8 @@ def monitor_mode(conn, uwb):
 
 def main():
     import sys
+    from matplotlib.gridspec import GridSpec
+
     monitor = '--monitor' in sys.argv
 
     conn = connect()
@@ -886,7 +979,8 @@ def main():
     request_streams(conn)
 
     stop_hb = threading.Event()
-    hb = threading.Thread(target=_heartbeat_loop, args=(conn, stop_hb), daemon=True)
+    hb = threading.Thread(target=_heartbeat_loop,
+                          args=(conn, stop_hb, uwb), daemon=True)
     hb.start()
 
     if monitor:
@@ -902,19 +996,25 @@ def main():
     ft = threading.Thread(target=_flight, args=(conn, uwb), daemon=True)
     ft.start()
 
-    fig = plt.figure(figsize=(24, 9))
-    fig.suptitle("ArduPilot + GrowSpace UWB", fontsize=13, fontweight='bold')
-    ax_info = fig.add_subplot(2, 3, 1)
-    ax_map  = fig.add_subplot(2, 3, 2)
-    ax_alt  = fig.add_subplot(2, 3, 3)
-    ax_fc   = fig.add_subplot(2, 3, 4)
-    ax_log  = fig.add_subplot(2, 3, 5)
-    ax_map.set_aspect('equal')
+    # ── 레이아웃: 2행 3열, 맵이 가운데 열 전체 차지 ──────────────────────────
+    fig = plt.figure(figsize=(26, 10))
+    fig.suptitle("ArduPilot + GrowSpace UWB  |  실내 자율비행",
+                 fontsize=13, fontweight='bold')
+    gs = GridSpec(2, 3, figure=fig,
+                  left=0.04, right=0.97, top=0.93, bottom=0.06,
+                  hspace=0.35, wspace=0.32)
+
+    ax_status = fig.add_subplot(gs[0, 0])   # 상태/ARM
+    ax_map    = fig.add_subplot(gs[:, 1])   # XY 맵 (전체 높이)
+    ax_alt    = fig.add_subplot(gs[0, 2])   # 고도 그래프
+    ax_sensor = fig.add_subplot(gs[1, 0])   # 센서/모터
+    ax_log    = fig.add_subplot(gs[1, 2])   # 비행 로그
+
     fig.ani = animation.FuncAnimation(
-        fig, _update, fargs=(ax_info, ax_map, ax_alt, ax_fc, ax_log, uwb),
+        fig, _update,
+        fargs=(ax_status, ax_map, ax_alt, ax_sensor, ax_log, uwb),
         interval=200, cache_frame_data=False,
     )
-    plt.tight_layout()
     plt.show()
     ft.join()
     uwb.stop()
