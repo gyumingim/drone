@@ -215,7 +215,7 @@ class UWBTag:
         cov = [0.0] * 21
         cov[0]  = 0.01   # x variance (0.1m std)
         cov[6]  = 0.01   # y variance
-        cov[11] = 0.01   # z variance
+        cov[11] = 9999.0  # z variance 무한대 → EKF가 VISION z 무시 (baro 전담)
         cov[15] = 0.1    # roll variance (unused — we send 0)
         cov[18] = 0.1    # pitch variance
         cov[20] = 0.1    # yaw variance
