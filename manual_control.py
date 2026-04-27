@@ -8,6 +8,7 @@ ArduPilot manual control + GrowSpace UWB Listener integration
 
 import time
 import threading
+from collections import deque
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pymavlink import mavutil
@@ -64,9 +65,12 @@ _telem: dict = {
     'ekf_flags': None,
     'takeoff_start_z': None,
     'takeoff_target_z': None,
+    'baro_alt': None,
     'ts': 0.0,
 }
 _telem_lock = threading.Lock()
+
+_alt_history: deque = deque(maxlen=300)  # (timestamp, baro_alt, ekf_alt)
 
 
 def _tset(**kw) -> None:
@@ -575,7 +579,7 @@ def _draw_fc_panel(ax, uwb):
             va='top', fontsize=8, family='monospace', color=col)
 
 
-def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
+def _update(frame, ax_info, ax_map, ax_alt, ax_fc, ax_log, uwb):
     now = time.time()
     tags = uwb.get_tags()
     stale = 1.0
@@ -657,6 +661,9 @@ def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
             transform=ax_map.transAxes,
         )
 
+    # ── altitude graph ───────────────────────────────────────────────────────
+    _draw_alt_panel(ax_alt)
+
     # ── FC telemetry ─────────────────────────────────────────────────────────
     _draw_fc_panel(ax_fc, uwb)
 
@@ -695,6 +702,38 @@ def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
         )
 
 
+def _draw_alt_panel(ax):
+    ax.cla()
+    with _telem_lock:
+        hist = list(_alt_history)
+        cur_baro = _telem.get('baro_alt')
+    if not hist:
+        ax.set_title("Altitude (m)")
+        ax.text(0.5, 0.5, 'Waiting for baro...',
+                ha='center', va='center', transform=ax.transAxes,
+                color='gray', fontsize=10)
+        return
+    now = time.time()
+    ts   = [h[0] - now for h in hist]
+    baro = [h[1] for h in hist]
+    ekf  = [h[2] for h in hist]
+    ax.plot(ts, baro, color='#3498db', linewidth=1.5, label='Baro')
+    valid = [(t, e) for t, e in zip(ts, ekf) if e is not None]
+    if valid:
+        te, ve = zip(*valid)
+        ax.plot(te, ve, color='#e74c3c', linewidth=1.5,
+                linestyle='--', label='EKF')
+    ax.legend(fontsize=8)
+    ax.set_xlim(max(ts[0], -60), 2)
+    ax.set_xlabel("time (s ago)")
+    ax.set_ylabel("alt (m)")
+    ax.grid(True, linestyle='--', alpha=0.4)
+    title = "Altitude (m)"
+    if cur_baro is not None:
+        title += f"  Baro={cur_baro:+.2f}m"
+    ax.set_title(title)
+
+
 def _heartbeat_loop(conn, stop_evt):
     """Send GCS heartbeat every 1s so ArduPilot knows we're alive."""
     while not stop_evt.is_set():
@@ -706,6 +745,13 @@ def _heartbeat_loop(conn, stop_evt):
             )
         except Exception:
             return
+        msg = conn.recv_match(type='VFR_HUD', blocking=False)
+        if msg:
+            with _telem_lock:
+                _telem['baro_alt'] = msg.alt
+                ned_z = _telem.get('ned_z')
+            ekf_alt = -ned_z if ned_z is not None else None
+            _alt_history.append((time.time(), msg.alt, ekf_alt))
         time.sleep(1.0)
 
 
@@ -832,15 +878,16 @@ def main():
     ft = threading.Thread(target=_flight, args=(conn, uwb), daemon=True)
     ft.start()
 
-    fig = plt.figure(figsize=(18, 9))
+    fig = plt.figure(figsize=(24, 9))
     fig.suptitle("ArduPilot + GrowSpace UWB", fontsize=13, fontweight='bold')
-    ax_info = fig.add_subplot(2, 2, 1)
-    ax_map  = fig.add_subplot(2, 2, 2)
-    ax_fc   = fig.add_subplot(2, 2, 3)
-    ax_log  = fig.add_subplot(2, 2, 4)
+    ax_info = fig.add_subplot(2, 3, 1)
+    ax_map  = fig.add_subplot(2, 3, 2)
+    ax_alt  = fig.add_subplot(2, 3, 3)
+    ax_fc   = fig.add_subplot(2, 3, 4)
+    ax_log  = fig.add_subplot(2, 3, 5)
     ax_map.set_aspect('equal')
     fig.ani = animation.FuncAnimation(
-        fig, _update, fargs=(ax_info, ax_map, ax_fc, ax_log, uwb),
+        fig, _update, fargs=(ax_info, ax_map, ax_alt, ax_fc, ax_log, uwb),
         interval=200, cache_frame_data=False,
     )
     plt.tight_layout()
