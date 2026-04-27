@@ -379,21 +379,35 @@ def _heartbeat_loop(conn, stop_evt, uwb):
             )
         except Exception:
             return
-        msg = conn.recv_match(type='VFR_HUD', blocking=False)
-        if msg:
-            with _telem_lock:
-                _telem['baro_alt'] = msg.alt
-                ned_z = _telem.get('ned_z')
-            ekf_alt   = -ned_z if ned_z is not None else None
-            drone_pos = uwb.get_drone_pos()
-            uwb_h     = -drone_pos[2] if drone_pos else None
-            _alt_history.append((time.time(), msg.alt, ekf_alt, uwb_h))
-        att = conn.recv_match(type='ATTITUDE', blocking=False)
-        if att:
-            with _telem_lock:
-                _telem['yaw_rad']   = att.yaw
-                _telem['roll_rad']  = att.roll
-                _telem['pitch_rad'] = att.pitch
+        for _ in range(20):
+            msg = conn.recv_match(
+                type=['VFR_HUD', 'ATTITUDE', 'LOCAL_POSITION_NED',
+                      'EKF_STATUS_REPORT', 'SERVO_OUTPUT_RAW'],
+                blocking=False,
+            )
+            if msg is None:
+                break
+            t = msg.get_type()
+            if t == 'VFR_HUD':
+                with _telem_lock:
+                    _telem['baro_alt'] = msg.alt
+                    ned_z = _telem.get('ned_z')
+                ekf_alt   = -ned_z if ned_z is not None else None
+                drone_pos = uwb.get_drone_pos()
+                uwb_h     = -drone_pos[2] if drone_pos else None
+                _alt_history.append((time.time(), msg.alt, ekf_alt, uwb_h))
+            elif t == 'ATTITUDE':
+                with _telem_lock:
+                    _telem['yaw_rad']   = msg.yaw
+                    _telem['roll_rad']  = msg.roll
+                    _telem['pitch_rad'] = msg.pitch
+            elif t == 'LOCAL_POSITION_NED':
+                _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
+            elif t == 'EKF_STATUS_REPORT':
+                _tset(ekf_flags=msg.flags)
+            elif t == 'SERVO_OUTPUT_RAW':
+                _tset(servo=(msg.servo1_raw, msg.servo2_raw,
+                             msg.servo3_raw, msg.servo4_raw))
         time.sleep(1.0)
 
 
@@ -717,18 +731,26 @@ def run(flight_fn, title='FLIGHT'):
     hb = threading.Thread(target=_heartbeat_loop, args=(conn, stop_hb, uwb), daemon=True)
     hb.start()
 
-    if monitor:
-        try:
-            monitor_mode(conn, uwb)
-        except KeyboardInterrupt:
-            print("\nMonitor stopped.")
-        finally:
-            uwb.stop()
-            stop_hb.set()
-        return
-
-    disp = threading.Thread(target=_display_loop, args=(uwb, title, stop_disp), daemon=True)
+    monitor_title = title + '  [MONITOR]' if monitor else title
+    disp = threading.Thread(
+        target=_display_loop, args=(uwb, monitor_title, stop_disp), daemon=True)
     disp.start()
+
+    if monitor:
+        flog("Monitor mode — no arming. Ctrl-C to exit.")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            flog("Monitor stopped.")
+        finally:
+            stop_disp.set()
+            time.sleep(0.4)
+            stop_hb.set()
+            uwb.stop()
+            sys.stdout.write('\033[?25h\n')
+            sys.stdout.flush()
+        return
 
     ft = threading.Thread(target=flight_fn, args=(conn, uwb), daemon=True)
     ft.start()
