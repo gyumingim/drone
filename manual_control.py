@@ -66,6 +66,7 @@ _telem: dict = {
     'takeoff_start_z': None,
     'takeoff_target_z': None,
     'baro_alt': None,
+    'yaw_rad': None,
     'ts': 0.0,
 }
 _telem_lock = threading.Lock()
@@ -647,6 +648,25 @@ def _update(frame, ax_info, ax_map, ax_alt, ax_fc, ax_log, uwb):
             info['x'] + 0.1, info['y'] + 0.1,
             f"{tag_id}\nQF={info['qf']}", fontsize=8, color=mc,
         )
+        # yaw 화살표: NED yaw (0=북/+x, 시계방향 양수)
+        with _telem_lock:
+            yaw = _telem.get('yaw_rad')
+        if yaw is not None:
+            import math
+            arrow_len = 0.4
+            # NED: x=북, y=동 → matplotlib x=UWB_x(북), y=UWB_y(동)
+            dx = arrow_len * math.cos(yaw)   # NED x 성분
+            dy = arrow_len * math.sin(yaw)   # NED y 성분
+            ax_map.annotate(
+                '', xy=(info['x'] + dx, info['y'] + dy),
+                xytext=(info['x'], info['y']),
+                arrowprops=dict(arrowstyle='->', color='orange', lw=2),
+                zorder=11,
+            )
+            ax_map.text(
+                info['x'] + dx + 0.05, info['y'] + dy + 0.05,
+                f"{math.degrees(yaw):.0f}°", fontsize=8, color='orange',
+            )
         all_x.append(info['x'])
         all_y.append(info['y'])
 
@@ -752,6 +772,10 @@ def _heartbeat_loop(conn, stop_evt):
                 ned_z = _telem.get('ned_z')
             ekf_alt = -ned_z if ned_z is not None else None
             _alt_history.append((time.time(), msg.alt, ekf_alt))
+        att = conn.recv_match(type='ATTITUDE', blocking=False)
+        if att:
+            with _telem_lock:
+                _telem['yaw_rad'] = att.yaw
         time.sleep(1.0)
 
 
