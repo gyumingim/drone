@@ -916,7 +916,15 @@ def _update(frame, ax_info, ax_map, ax_fc, ax_log, uwb):
 
 
 def _heartbeat_loop(conn, stop_evt):
-    """Send GCS heartbeat every 1s so ArduPilot knows we're alive."""
+    """Send GCS heartbeat every 1s. Also re-sends RC8=2000 override every 2s.
+
+    RC8_OPTION=18 (Motor Interlock): motors only spin when RC8 >= ~1800.
+    With no RC transmitter, RC8 defaults to trim=1500 → interlock disabled
+    → motors stay at 1000 even after ARM/TAKEOFF. Overriding RC8=2000 here
+    keeps the interlock permanently enabled during GCS-controlled flights.
+    RC_OVERRIDE_TIME=3.0s, so must resend within 3s to avoid expiry.
+    """
+    last_rc = 0.0
     while not stop_evt.is_set():
         try:
             conn.mav.heartbeat_send(
@@ -924,6 +932,13 @@ def _heartbeat_loop(conn, stop_evt):
                 mavutil.mavlink.MAV_AUTOPILOT_INVALID,
                 0, 0, 0
             )
+            now = time.time()
+            if now - last_rc >= 2.0:
+                conn.mav.rc_channels_override_send(
+                    conn.target_system, conn.target_component,
+                    0, 0, 0, 0, 0, 0, 0, 2000,  # ch8=2000: motor interlock ON
+                )
+                last_rc = now
         except Exception:
             return
         time.sleep(1.0)
