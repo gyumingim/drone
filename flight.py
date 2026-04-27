@@ -93,13 +93,6 @@ def main():
          mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 4, 0, 0, 0, 0, 0)
     time.sleep(0.5)
 
-    # Motor Interlock 해제 (RC8_OPTION=18: CH8 HIGH=2000 → 모터 활성화)
-    c.mav.rc_channels_override_send(
-        c.target_system, c.target_component,
-        0, 0, 0, 0, 0, 0, 0, 2000,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    time.sleep(0.3)
-
     # ARM
     _cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
     print('[FC] arm 대기...')
