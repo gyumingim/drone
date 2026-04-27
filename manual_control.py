@@ -487,39 +487,36 @@ import math as _math
 
 
 def _draw_status(ax):
-    """Panel: ARM 상태, Phase, EKF 플래그 — 가장 중요한 패널."""
     ax.cla()
     ax.axis('off')
 
     with _telem_lock:
         t = dict(_telem)
 
-    armed   = t.get('armed')
-    phase   = t.get('phase', 'init').upper()
-    mode    = t.get('mode') or '?'
-    ekf     = t.get('ekf_flags')
-    ned_z   = t.get('ned_z')
-    ned_x   = t.get('ned_x') or 0.0
-    ned_y   = t.get('ned_y') or 0.0
-    baro    = t.get('baro_alt')
-    yaw     = t.get('yaw_rad')
-    roll    = t.get('roll_rad')
-    pitch   = t.get('pitch_rad')
+    armed  = t.get('armed')
+    phase  = t.get('phase', 'init').upper()
+    mode   = t.get('mode') or '?'
+    ekf    = t.get('ekf_flags')
+    ned_z  = t.get('ned_z')
+    ned_x  = t.get('ned_x') or 0.0
+    ned_y  = t.get('ned_y') or 0.0
+    baro   = t.get('baro_alt')
+    yaw    = t.get('yaw_rad')
+    roll   = t.get('roll_rad')
+    pitch  = t.get('pitch_rad')
 
-    # ARM 배너
     if armed:
-        bg_col = '#27ae60'; arm_txt = '● ARMED'
+        bg_col = '#27ae60'; arm_txt = '[ ARMED ]'
     elif armed is False:
-        bg_col = '#c0392b'; arm_txt = '○ DISARMED'
+        bg_col = '#c0392b'; arm_txt = '[ DISARMED ]'
     else:
-        bg_col = '#7f8c8d'; arm_txt = '? UNKNOWN'
+        bg_col = '#7f8c8d'; arm_txt = '[ UNKNOWN ]'
 
     ax.set_facecolor(bg_col + '22')
     ax.text(0.5, 0.97, arm_txt, transform=ax.transAxes,
             ha='center', va='top', fontsize=22, fontweight='bold',
             color=bg_col, family='monospace')
 
-    # Phase
     _phase_color = {
         'INIT': '#7f8c8d', 'ARMING': '#f39c12', 'ARMED': '#f39c12',
         'TAKEOFF': '#3498db', 'HOVER': '#2ecc71', 'MISSION': '#9b59b6',
@@ -532,44 +529,41 @@ def _draw_status(ax):
     ax.text(0.5, 0.71, f'MODE: {mode}', transform=ax.transAxes,
             ha='center', va='top', fontsize=10, color='#2c3e50')
 
-    # EKF 상태
     if ekf is not None:
         ok = (ekf & _EKF_NEED) == _EKF_NEED
         ec = '#27ae60' if ok else '#e74c3c'
-        ax.text(0.5, 0.63, '✓ EKF READY' if ok else '✗ EKF NOT READY',
+        ax.text(0.5, 0.63,
+                '[OK] EKF READY' if ok else '[!!] EKF NOT READY',
                 transform=ax.transAxes, ha='center', va='top',
                 fontsize=11, color=ec, fontweight='bold')
-        flags = (f"  att={'✓' if ekf & _EKF_ATT else '✗'}"
-                 f"  vel={'✓' if ekf & _EKF_VEL_H else '✗'}"
-                 f"  pos_rel={'✓' if ekf & _EKF_POS_REL else '✗'}"
-                 f"  pos_abs={'✓' if ekf & _EKF_POS_ABS else '✗'}")
+        flags = (f"  att={'Y' if ekf & _EKF_ATT else 'N'}"
+                 f"  vel={'Y' if ekf & _EKF_VEL_H else 'N'}"
+                 f"  pos_rel={'Y' if ekf & _EKF_POS_REL else 'N'}"
+                 f"  pos_abs={'Y' if ekf & _EKF_POS_ABS else 'N'}")
         ax.text(0.5, 0.56, flags, transform=ax.transAxes,
                 ha='center', va='top', fontsize=8.5, family='monospace',
                 color=ec)
 
-    # 수치 정보
     lines = ['']
     if ned_z is not None:
-        lines.append(f"EKF 고도   : {-ned_z:+.3f} m")
+        lines.append(f"EKF alt    : {-ned_z:+.3f} m")
         lines.append(f"EKF x,y    : ({ned_x:+.2f}, {ned_y:+.2f}) m")
     if baro is not None:
-        lines.append(f"Baro 고도  : {baro:+.3f} m")
+        lines.append(f"Baro alt   : {baro:+.3f} m")
     if roll is not None:
-        lines.append(f"Roll/Pitch : {_math.degrees(roll):+.1f}° / "
-                     f"{_math.degrees(pitch):+.1f}°")
+        lines.append(f"Roll/Pitch : {_math.degrees(roll):+.1f}deg / "
+                     f"{_math.degrees(pitch):+.1f}deg")
     if yaw is not None:
-        lines.append(f"Yaw        : {_math.degrees(yaw):+.1f}°")
+        lines.append(f"Yaw        : {_math.degrees(yaw):+.1f}deg")
 
-    # 이륙 진행 바
-    start_z  = t.get('takeoff_start_z')
-    target_z = t.get('takeoff_target_z')
+    start_z = t.get('takeoff_start_z')
     if start_z is not None and ned_z is not None:
         delta = start_z - ned_z
         pct   = max(0.0, min(delta / TAKEOFF_ALT, 1.0))
-        bar   = '█' * int(pct * 14) + '░' * (14 - int(pct * 14))
+        bar   = '#' * int(pct * 14) + '-' * (14 - int(pct * 14))
         lines.append('')
-        lines.append(f"이륙 [{bar}]")
-        lines.append(f"     {delta:.2f} / {TAKEOFF_ALT:.1f} m")
+        lines.append(f"Climb [{bar}]")
+        lines.append(f"      {delta:.2f} / {TAKEOFF_ALT:.1f} m")
 
     ax.text(0.05, 0.49, '\n'.join(lines), transform=ax.transAxes,
             va='top', fontsize=9, family='monospace', color='#2c3e50')
@@ -664,16 +658,16 @@ def _draw_map(ax, uwb):
         ax.text(nx + 0.55, ny, 'N(+x)', fontsize=8, color='#2c3e50',
                 va='center')
     else:
-        ax.text(0.5, 0.5, 'UWB 데이터 없음', ha='center', va='center',
+        ax.text(0.5, 0.5, 'No UWB data', ha='center', va='center',
                 fontsize=11, color='gray', transform=ax.transAxes)
 
     if ned_x is not None:
         ax.legend(fontsize=8, loc='lower right')
 
-    yaw_str = f"{_math.degrees(yaw):.1f}°" if yaw is not None else "N/A"
-    ax.set_xlabel("X (m)  ← 나침반 북쪽")
-    ax.set_ylabel("Y (m)  ← 나침반 동쪽")
-    ax.set_title(f"UWB 위치 맵   yaw={yaw_str}")
+    yaw_str = f"{_math.degrees(yaw):.1f}deg" if yaw is not None else "N/A"
+    ax.set_xlabel("X (m)  [compass North]")
+    ax.set_ylabel("Y (m)  [compass East]")
+    ax.set_title(f"UWB Position Map   yaw={yaw_str}")
 
 
 def _draw_altitude(ax):
@@ -687,8 +681,8 @@ def _draw_altitude(ax):
         ned_z    = _telem.get('ned_z')
 
     if not hist:
-        ax.set_title("고도 (m)")
-        ax.text(0.5, 0.5, 'Baro 대기 중...',
+        ax.set_title("Altitude (m)")
+        ax.text(0.5, 0.5, 'Waiting for baro...',
                 ha='center', va='center', transform=ax.transAxes,
                 color='gray', fontsize=10)
         return
@@ -723,7 +717,7 @@ def _draw_altitude(ax):
         parts.append(f"Baro={cur_baro:+.2f}m")
     if ned_z is not None:
         parts.append(f"EKF={-ned_z:+.2f}m")
-    ax.set_title("고도  " + "  ".join(parts))
+    ax.set_title("Altitude  " + "  ".join(parts))
 
 
 def _draw_sensors(ax, uwb):
@@ -734,54 +728,50 @@ def _draw_sensors(ax, uwb):
     with _telem_lock:
         t = dict(_telem)
 
-    lines = ['─── 액추에이터 / 센서 ───', '']
+    lines = ['--- Actuators / Sensors ---', '']
 
-    # 모터 PWM 바
     servo = t.get('servo')
     if servo is not None:
-        lines.append('모터 PWM:')
+        lines.append('Motor PWM:')
         for i, v in enumerate(servo):
             pct = max(0.0, min((v - 1000) / 1000, 1.0))
-            bar = '█' * int(pct * 10) + '░' * (10 - int(pct * 10))
+            bar = '#' * int(pct * 10) + '-' * (10 - int(pct * 10))
             on  = v > 1050
-            lines.append(f"  M{i+1}: {v:4d} [{bar}] {'▲ON' if on else 'off'}")
+            lines.append(f"  M{i+1}: {v:4d} [{bar}] {'ON' if on else 'off'}")
     else:
-        lines.append('모터: 대기 중')
+        lines.append('Motor: waiting')
     lines.append('')
 
-    # 자세 (Roll / Pitch / Yaw)
     roll  = t.get('roll_rad')
     pitch = t.get('pitch_rad')
     yaw   = t.get('yaw_rad')
     if roll is not None:
-        lines.append('자세:')
+        lines.append('Attitude:')
         for name, rad in [('Roll ', roll), ('Pitch', pitch), ('Yaw  ', yaw)]:
             deg = _math.degrees(rad)
             pct = (deg + 180) / 360
-            bar = '█' * int(pct * 10) + '░' * (10 - int(pct * 10))
-            lines.append(f"  {name}: {deg:+6.1f}° [{bar}]")
+            bar = '#' * int(pct * 10) + '-' * (10 - int(pct * 10))
+            lines.append(f"  {name}: {deg:+6.1f}deg [{bar}]")
     lines.append('')
 
-    # UWB 수치
     drone_pos = uwb.get_drone_pos()
     vision_n  = getattr(uwb, '_dbg_cnt', 0)
-    lines.append(f'VISION 전송: {vision_n}회')
+    lines.append(f'VISION sent: {vision_n}')
     if drone_pos:
         rx, ry, rz = drone_pos
-        lines.append(f'UWB 높이  : {-rz:+.3f} m')
-        lines.append(f'UWB rel   : ({rx:+.2f}, {ry:+.2f})')
+        lines.append(f'UWB height : {-rz:+.3f} m')
+        lines.append(f'UWB rel    : ({rx:+.2f}, {ry:+.2f})')
     tags = uwb.get_tags()
     if tags:
         info = next(iter(tags.values()))
         fw = info.get('fw_pos')
         if fw:
-            lines.append(f'fw_pos z  : {fw[2]:+.3f}m  qf={fw[3]}')
-        lines.append('앵커 거리:')
+            lines.append(f'fw_pos z   : {fw[2]:+.3f}m  qf={fw[3]}')
+        lines.append('Anchor dist:')
         for aid, av in sorted(info.get('anchors', {}).items()):
             lines.append(f"  {aid}: {av['dist_m']:.3f} m")
     lines.append('')
 
-    # EKF-UWB 드리프트
     ned_x = t.get('ned_x') or 0.0
     ned_y = t.get('ned_y') or 0.0
     ned_z = t.get('ned_z')
@@ -789,8 +779,8 @@ def _draw_sensors(ax, uwb):
         dx = drone_pos[0] - ned_x
         dy = drone_pos[1] - ned_y
         dz = drone_pos[2] - ned_z
-        lines.append(f'EKF-UWB Δ:')
-        lines.append(f'  Δx={dx:+.3f} Δy={dy:+.3f} Δz={dz:+.3f}')
+        lines.append('EKF-UWB delta:')
+        lines.append(f'  dx={dx:+.3f} dy={dy:+.3f} dz={dz:+.3f}')
 
     ax.text(0.03, 0.97, '\n'.join(lines),
             transform=ax.transAxes, va='top',
@@ -807,7 +797,7 @@ def _draw_log(ax):
         lines = list(_flight_log)
 
     if not lines:
-        ax.text(0.5, 0.5, '로그 대기 중...',
+        ax.text(0.5, 0.5, 'Waiting for log...',
                 ha='center', va='center', fontsize=10, color='gray',
                 transform=ax.transAxes)
         return
@@ -998,7 +988,7 @@ def main():
 
     # ── 레이아웃: 2행 3열, 맵이 가운데 열 전체 차지 ──────────────────────────
     fig = plt.figure(figsize=(26, 10))
-    fig.suptitle("ArduPilot + GrowSpace UWB  |  실내 자율비행",
+    fig.suptitle("ArduPilot + GrowSpace UWB  |  Indoor Autonomous Flight",
                  fontsize=13, fontweight='bold')
     gs = GridSpec(2, 3, figure=fig,
                   left=0.04, right=0.97, top=0.93, bottom=0.06,
