@@ -289,6 +289,9 @@ def takeoff(conn, alt=TAKEOFF_ALT):
     ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
     if ack:
         flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
+        if ack.result != 0:
+            flog("TAKEOFF rejected by FC — aborting")
+            return None
     else:
         flog("TAKEOFF: no ACK")
 
