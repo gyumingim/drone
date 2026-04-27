@@ -178,7 +178,7 @@ def connect(uwb):
 
 
 def do_takeoff(c, stop, takeoff_m=TAKEOFF_M):
-    """TAKEOFF 명령 + vz<-0.2 이륙 감지. 성공 True, 실패 False."""
+    """TAKEOFF 명령 + 목표 고도 도달 + 속도 안정 대기. 성공 True, 실패 False."""
     cmd(c, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, float('nan'), 0, 0, takeoff_m)
     ack = c.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
     result = getattr(ack, 'result', -1)
@@ -186,14 +186,16 @@ def do_takeoff(c, stop, takeoff_m=TAKEOFF_M):
     if result != 0:
         return False
 
-    deadline = time.time() + 15
+    # 목표 고도 (NED: 음수=위) 도달 + 수직 속도 안정 확인
+    target_z = -(takeoff_m - 0.2)   # 허용 마진 0.2m
+    deadline = time.time() + 20
     while time.time() < deadline:
         m = c.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1)
         if m is None:
             continue
-        print(f'[TKOF] {ts()} z={m.z:.3f} vz={m.vz:.3f}')
-        if m.vz < -0.2:
-            print(f'[TKOF] {ts()} 이륙 감지!')
+        print(f'[TKOF] {ts()} z={m.z:.3f} vz={m.vz:.3f} (목표 z<{target_z:.2f})')
+        if m.z < target_z and abs(m.vz) < 0.15:
+            print(f'[TKOF] {ts()} 고도 도달 안정!')
             return True
     print(f'[TKOF] {ts()} 타임아웃')
     return False
