@@ -91,12 +91,33 @@ def _live(msg: str) -> None:
 
 
 # ── EKF bits ──────────────────────────────────────────────────────────────────
-_EKF_ATT     = 0x001
-_EKF_VEL_H   = 0x002
-_EKF_POS_REL = 0x008
-_EKF_POS_ABS = 0x010
-_EKF_CONST   = 0x080
-_EKF_NEED    = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
+_EKF_ATT      = 0x001
+_EKF_VEL_H    = 0x002
+_EKF_VEL_V    = 0x004
+_EKF_POS_REL  = 0x008
+_EKF_POS_ABS  = 0x010
+_EKF_VERT_ABS = 0x020
+_EKF_AGL      = 0x040
+_EKF_CONST    = 0x080   # const-position fallback: no horizontal position source
+_EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
+
+_ekf_prev_flags = None   # change-detection for EKF log
+
+
+def _ekf_diagnose(flags: int) -> str:
+    """One-line reason string for an EKF state that is not fully ready."""
+    reasons = []
+    if flags & _EKF_CONST:
+        reasons.append('const_pos_mode(수평위치 없음)')
+    if not (flags & _EKF_ATT):
+        reasons.append('no_att')
+    if not (flags & _EKF_VEL_H):
+        reasons.append('no_vel_h')
+    if not (flags & _EKF_POS_REL):
+        reasons.append('no_pos_rel')
+    if not (flags & _EKF_POS_ABS):
+        reasons.append('no_pos_abs')
+    return ', '.join(reasons)
 
 _POS_ONLY = (
     mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE  |
@@ -139,6 +160,7 @@ def request_streams(conn):
 
 
 def wait_ready(conn, timeout=15):
+    global _ekf_prev_flags
     flog("Waiting for EKF...")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -146,12 +168,47 @@ def wait_ready(conn, timeout=15):
         if msg:
             bits = msg.flags
             _tset(ekf_flags=bits)
-            flog(f"EKF={bits:#06x} att={bool(bits&_EKF_ATT)} vel={bool(bits&_EKF_VEL_H)} "
-                 f"pos_rel={bool(bits&_EKF_POS_REL)} pos_abs={bool(bits&_EKF_POS_ABS)}")
+            if bits != _ekf_prev_flags:
+                _ekf_prev_flags = bits
+                ok = (bits & _EKF_NEED) == _EKF_NEED
+                if ok:
+                    flog(f"[EKF] READY ({bits:#06x})")
+                else:
+                    diag = _ekf_diagnose(bits)
+                    flog(f"[EKF] NOT READY ({bits:#06x}) — {diag}")
             if (bits & _EKF_NEED) == _EKF_NEED:
                 flog("EKF Ready")
                 return
     flog("EKF Timeout — proceeding anyway")
+
+
+def wait_ekf_stable(uwb, threshold=0.3, stable_secs=2.0, timeout=30):
+    """EKF-UWB 수평 드리프트가 threshold 이하로 stable_secs 유지될 때까지 대기."""
+    flog(f"Waiting for EKF to stabilize (drift<{threshold}m for {stable_secs}s)...")
+    stable_since = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _telem_lock:
+            ned_x = _telem.get('ned_x')
+            ned_y = _telem.get('ned_y')
+        drone_pos = uwb.get_drone_pos()
+        if ned_x is not None and drone_pos is not None:
+            dx = abs(drone_pos[0] - ned_x)
+            dy = abs(drone_pos[1] - ned_y)
+            drift = (dx**2 + dy**2) ** 0.5
+            if drift < threshold:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= stable_secs:
+                    flog(f"EKF stable: drift={drift:.3f}m — OK to fly")
+                    return True
+            else:
+                if stable_since is not None:
+                    flog(f"EKF drift reset: {drift:.3f}m")
+                stable_since = None
+        time.sleep(0.2)
+    flog("EKF stability timeout — proceeding anyway")
+    return False
 
 
 def set_guided(conn, timeout=5):
@@ -258,11 +315,25 @@ def takeoff(conn, alt=TAKEOFF_ALT):
         0, 0, 0, float('nan'), 0, 0, alt,
     )
     flog(f"TAKEOFF cmd sent, target={alt}m")
-    ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+    # Wait specifically for the TAKEOFF command ACK; skip stale ACKs for ARM/MODE
+    ack = None
+    deadline_ack = time.time() + 3.0
+    while time.time() < deadline_ack:
+        msg = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=0.5)
+        if msg is None:
+            continue
+        cmd_id = getattr(msg, 'command', None)
+        if cmd_id == mavutil.mavlink.MAV_CMD_NAV_TAKEOFF:
+            ack = msg
+            break
+        flog(f"[TAKEOFF] skip stale ACK cmd={cmd_id} result={msg.result}")
     if ack:
         flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
+        if ack.result != 0:
+            flog("TAKEOFF rejected by FC — aborting")
+            return None
     else:
-        flog("TAKEOFF: no ACK")
+        flog("TAKEOFF: no ACK (timeout)")
 
     _tset(phase='takeoff')
     start_z = None
@@ -369,7 +440,11 @@ def debug_status(conn, uwb, duration=15):
 
 # ── heartbeat + telem collection ──────────────────────────────────────────────
 
+_vision_log_ts = 0.0   # last time we logged VISION content
+
+
 def _heartbeat_loop(conn, stop_evt, uwb):
+    global _vision_log_ts
     while not stop_evt.is_set():
         try:
             conn.mav.heartbeat_send(
@@ -382,7 +457,7 @@ def _heartbeat_loop(conn, stop_evt, uwb):
         for _ in range(20):
             msg = conn.recv_match(
                 type=['VFR_HUD', 'ATTITUDE', 'LOCAL_POSITION_NED',
-                      'EKF_STATUS_REPORT', 'SERVO_OUTPUT_RAW'],
+                      'EKF_STATUS_REPORT', 'SERVO_OUTPUT_RAW', 'STATUSTEXT'],
                 blocking=False,
             )
             if msg is None:
@@ -401,13 +476,55 @@ def _heartbeat_loop(conn, stop_evt, uwb):
                     _telem['yaw_rad']   = msg.yaw
                     _telem['roll_rad']  = msg.roll
                     _telem['pitch_rad'] = msg.pitch
+                uwb.set_yaw(msg.yaw)
             elif t == 'LOCAL_POSITION_NED':
                 _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
             elif t == 'EKF_STATUS_REPORT':
-                _tset(ekf_flags=msg.flags)
+                global _ekf_prev_flags
+                new_flags = msg.flags
+                _tset(ekf_flags=new_flags)
+                if new_flags != _ekf_prev_flags:
+                    old_flags = _ekf_prev_flags
+                    _ekf_prev_flags = new_flags
+                    pr_new = bool(new_flags & _EKF_POS_REL)
+                    pa_new = bool(new_flags & _EKF_POS_ABS)
+                    ok_new = (new_flags & _EKF_NEED) == _EKF_NEED
+                    ok_old = (old_flags & _EKF_NEED) == _EKF_NEED if old_flags is not None else None
+                    if not ok_new:
+                        diag = _ekf_diagnose(new_flags)
+                        flog(f"[EKF!!] {new_flags:#06x} pos_rel={'Y' if pr_new else 'N'}"
+                             f" pos_abs={'Y' if pa_new else 'N'} — {diag}")
+                    elif ok_new and ok_old is False:
+                        flog(f"[EKF] 복구됨 — pos_rel=Y pos_abs=Y ({new_flags:#06x})")
             elif t == 'SERVO_OUTPUT_RAW':
                 _tset(servo=(msg.servo1_raw, msg.servo2_raw,
                              msg.servo3_raw, msg.servo4_raw))
+            elif t == 'STATUSTEXT':
+                text = msg.text.strip()
+                # EKF / navigation 관련 메시지만 필터링
+                tl = text.lower()
+                if any(k in tl for k in ('ekf', 'nav', 'vision', 'extern', 'gps',
+                                          'yaw', 'compass', 'pos', 'aiding',
+                                          'origin', 'field elev')):
+                    sev = getattr(msg, 'severity', 6)
+                    tag = '[FC!!]' if sev <= 3 else '[FC]'
+                    flog(f"{tag} {text}")
+
+        # VISION 전송 내용 5초마다 로그
+        now = time.time()
+        if now - _vision_log_ts >= 5.0:
+            _vision_log_ts = now
+            drone_pos = uwb.get_drone_pos()
+            with _telem_lock:
+                yaw_r = _telem.get('yaw_rad')
+            vis_n = getattr(uwb, '_dbg_cnt', 0)
+            if drone_pos:
+                x, y, _ = drone_pos
+                yaw_d = math.degrees(yaw_r) if yaw_r is not None else float('nan')
+                flog(f"[VISION] x={x:+.3f} y={y:+.3f} yaw={yaw_d:+.1f}° vis#{vis_n}")
+            else:
+                flog(f"[VISION] NO UWB DATA  vis#{vis_n}")
+
         time.sleep(1.0)
 
 
@@ -437,9 +554,9 @@ _PHASE_CLR = {
 }
 
 _LOG_CLR = {
-    ('fail', 'abort', 'emergency', 'error'): _RED,
-    ('safety', 'lost', 'timeout', 'warn'):   _YEL,
-    ('armed ok', 'takeoff complete', 'done', 'ready', 'mission complete'): _GRN,
+    ('fail', 'abort', 'emergency', 'error', '[ekf!!]'):     _RED,
+    ('safety', 'lost', 'timeout', 'warn', 'not ready'):     _YEL,
+    ('armed ok', 'takeoff complete', 'done', '[ekf] ready', '[ekf] 복구'): _GRN,
     ('arm', 'takeoff', 'climbing', 'landing', 'goto', 'reached'): _BLU,
 }
 
@@ -519,8 +636,12 @@ def _render(uwb, title):
                   f' vel={Y if ekf&_EKF_VEL_H else N}'
                   f' pos_rel={Y if ekf&_EKF_POS_REL else N}')
         c1.append(f'  pos_abs={Y if ekf&_EKF_POS_ABS else N}')
+        if ekf & _EKF_CONST:
+            c1.append(_c('  [const_pos: 위치입력 없음]', _RED))
+        else:
+            c1.append('')
     else:
-        c1 += [' (no EKF data)', '']
+        c1 += [' (no EKF data)', '', '']
     c1.append('')
     c1.append(f" EKF alt : {f'{-ned_z:+.3f}m' if ned_z is not None else 'N/A'}")
     c1.append(f" Baro    : {f'{baro:+.3f}m' if baro is not None else 'N/A'}")

@@ -21,6 +21,7 @@ def _flight(conn, uwb):
 
         viz.debug_status(conn, uwb, duration=15)
         viz.wait_ready(conn)
+        viz.wait_ekf_stable(uwb, threshold=0.3, stable_secs=2.0, timeout=30)
         viz.flog("Setting GUIDED mode...")
         viz.set_guided(conn)
         time.sleep(0.3)
