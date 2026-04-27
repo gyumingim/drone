@@ -115,19 +115,29 @@ def main():
 
     # TAKEOFF
     _cmd(c, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, float('nan'), 0, 0, TAKEOFF_M)
-    print(f'[FC] takeoff → {TAKEOFF_M}m')
-    start_z = None
-    while True:
+    ack = c.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+    if not ack or ack.result != 0:
+        print(f'[FC] TAKEOFF 거부 result={getattr(ack, "result", "timeout")} — 중단')
+        stop.set()
+        return
+    print(f'[FC] takeoff 수락 → {TAKEOFF_M}m')
+
+    # 이륙 완료 판정: vz(수직속도) 기반 — 바로미터 드리프트에 속지 않음
+    deadline = time.time() + 15
+    while time.time() < deadline:
         m = c.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1)
         if m is None:
             continue
-        if start_z is None:
-            start_z = m.z
-        print(f'  z={m.z:.2f}', end='\r')
-        # NED: z 음수가 위쪽 → start_z보다 (TAKEOFF_M - TOLERANCE) 이상 감소하면 도달
-        if m.z < start_z - (TAKEOFF_M - TOLERANCE):
-            print(f'\n[FC] 고도 도달 z={m.z:.2f}')
+        print(f'  z={m.z:.2f} vz={m.vz:.2f}', end='\r')
+        # NED vz 음수=상승, 0.2m/s 이상 상승 중이면 이륙으로 판정
+        if m.vz < -0.2:
+            print(f'\n[FC] 이륙 감지 z={m.z:.2f} vz={m.vz:.2f}')
             break
+    else:
+        print('\n[FC] 이륙 타임아웃 — 착륙')
+        _cmd(c, mavutil.mavlink.MAV_CMD_NAV_LAND, 0, 0, 0, 0, 0, 0, 0)
+        stop.set()
+        return
 
     # HOVER + UWB 안전 감시
     print(f'[FC] 호버 {HOVER_S}s')
