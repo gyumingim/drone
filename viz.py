@@ -91,12 +91,33 @@ def _live(msg: str) -> None:
 
 
 # ── EKF bits ──────────────────────────────────────────────────────────────────
-_EKF_ATT     = 0x001
-_EKF_VEL_H   = 0x002
-_EKF_POS_REL = 0x008
-_EKF_POS_ABS = 0x010
-_EKF_CONST   = 0x080
-_EKF_NEED    = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
+_EKF_ATT      = 0x001
+_EKF_VEL_H    = 0x002
+_EKF_VEL_V    = 0x004
+_EKF_POS_REL  = 0x008
+_EKF_POS_ABS  = 0x010
+_EKF_VERT_ABS = 0x020
+_EKF_AGL      = 0x040
+_EKF_CONST    = 0x080   # const-position fallback: no horizontal position source
+_EKF_NEED     = _EKF_ATT | _EKF_VEL_H | _EKF_POS_REL | _EKF_POS_ABS
+
+_ekf_prev_flags = None   # change-detection for EKF log
+
+
+def _ekf_diagnose(flags: int) -> str:
+    """One-line reason string for an EKF state that is not fully ready."""
+    reasons = []
+    if flags & _EKF_CONST:
+        reasons.append('const_pos_mode(수평위치 없음)')
+    if not (flags & _EKF_ATT):
+        reasons.append('no_att')
+    if not (flags & _EKF_VEL_H):
+        reasons.append('no_vel_h')
+    if not (flags & _EKF_POS_REL):
+        reasons.append('no_pos_rel')
+    if not (flags & _EKF_POS_ABS):
+        reasons.append('no_pos_abs')
+    return ', '.join(reasons)
 
 _POS_ONLY = (
     mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE  |
@@ -139,6 +160,7 @@ def request_streams(conn):
 
 
 def wait_ready(conn, timeout=15):
+    global _ekf_prev_flags
     flog("Waiting for EKF...")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -146,8 +168,14 @@ def wait_ready(conn, timeout=15):
         if msg:
             bits = msg.flags
             _tset(ekf_flags=bits)
-            flog(f"EKF={bits:#06x} att={bool(bits&_EKF_ATT)} vel={bool(bits&_EKF_VEL_H)} "
-                 f"pos_rel={bool(bits&_EKF_POS_REL)} pos_abs={bool(bits&_EKF_POS_ABS)}")
+            if bits != _ekf_prev_flags:
+                _ekf_prev_flags = bits
+                ok = (bits & _EKF_NEED) == _EKF_NEED
+                if ok:
+                    flog(f"[EKF] READY ({bits:#06x})")
+                else:
+                    diag = _ekf_diagnose(bits)
+                    flog(f"[EKF] NOT READY ({bits:#06x}) — {diag}")
             if (bits & _EKF_NEED) == _EKF_NEED:
                 flog("EKF Ready")
                 return
@@ -404,7 +432,24 @@ def _heartbeat_loop(conn, stop_evt, uwb):
             elif t == 'LOCAL_POSITION_NED':
                 _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
             elif t == 'EKF_STATUS_REPORT':
-                _tset(ekf_flags=msg.flags)
+                global _ekf_prev_flags
+                new_flags = msg.flags
+                _tset(ekf_flags=new_flags)
+                if new_flags != _ekf_prev_flags:
+                    old_flags = _ekf_prev_flags
+                    _ekf_prev_flags = new_flags
+                    pr_new = bool(new_flags & _EKF_POS_REL)
+                    pa_new = bool(new_flags & _EKF_POS_ABS)
+                    pr_old = bool(old_flags & _EKF_POS_REL) if old_flags is not None else None
+                    pa_old = bool(old_flags & _EKF_POS_ABS) if old_flags is not None else None
+                    ok_new = (new_flags & _EKF_NEED) == _EKF_NEED
+                    ok_old = (old_flags & _EKF_NEED) == _EKF_NEED if old_flags is not None else None
+                    if not ok_new:
+                        diag = _ekf_diagnose(new_flags)
+                        flog(f"[EKF!!] {new_flags:#06x} pos_rel={'Y' if pr_new else 'N'}"
+                             f" pos_abs={'Y' if pa_new else 'N'} — {diag}")
+                    elif ok_new and ok_old is False:
+                        flog(f"[EKF] 복구됨 — pos_rel=Y pos_abs=Y ({new_flags:#06x})")
             elif t == 'SERVO_OUTPUT_RAW':
                 _tset(servo=(msg.servo1_raw, msg.servo2_raw,
                              msg.servo3_raw, msg.servo4_raw))
@@ -437,9 +482,9 @@ _PHASE_CLR = {
 }
 
 _LOG_CLR = {
-    ('fail', 'abort', 'emergency', 'error'): _RED,
-    ('safety', 'lost', 'timeout', 'warn'):   _YEL,
-    ('armed ok', 'takeoff complete', 'done', 'ready', 'mission complete'): _GRN,
+    ('fail', 'abort', 'emergency', 'error', '[ekf!!]'):     _RED,
+    ('safety', 'lost', 'timeout', 'warn', 'not ready'):     _YEL,
+    ('armed ok', 'takeoff complete', 'done', '[ekf] ready', '[ekf] 복구'): _GRN,
     ('arm', 'takeoff', 'climbing', 'landing', 'goto', 'reached'): _BLU,
 }
 
@@ -519,8 +564,12 @@ def _render(uwb, title):
                   f' vel={Y if ekf&_EKF_VEL_H else N}'
                   f' pos_rel={Y if ekf&_EKF_POS_REL else N}')
         c1.append(f'  pos_abs={Y if ekf&_EKF_POS_ABS else N}')
+        if ekf & _EKF_CONST:
+            c1.append(_c('  [const_pos: 위치입력 없음]', _RED))
+        else:
+            c1.append('')
     else:
-        c1 += [' (no EKF data)', '']
+        c1 += [' (no EKF data)', '', '']
     c1.append('')
     c1.append(f" EKF alt : {f'{-ned_z:+.3f}m' if ned_z is not None else 'N/A'}")
     c1.append(f" Baro    : {f'{baro:+.3f}m' if baro is not None else 'N/A'}")
