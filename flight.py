@@ -51,11 +51,12 @@ def _hb_loop(c, stop):
 
 
 def _status_loop(c, stop):
-    """STATUSTEXT 수신 → 실시간 출력 (FC 경고/에러 진단용)."""
+    """STATUSTEXT 수신 → 실시간 출력 (non-blocking, 메인 쓰레드와 경쟁 방지)."""
     while not stop.is_set():
-        m = c.recv_match(type='STATUSTEXT', blocking=True, timeout=0.5)
+        m = c.recv_match(type='STATUSTEXT', blocking=False)
         if m:
             print(f'[FC] {m.severity} {m.text}')
+        time.sleep(0.05)
 
 
 def main():
