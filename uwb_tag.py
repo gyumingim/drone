@@ -258,15 +258,20 @@ class UWBTag:
                         now = time.time()
                         if not polling and now - last_data > NO_DATA_TIMEOUT:
                             print("[UWB] no stream detected — switching to les polling")
-                            ser.write(b'\r\n')
-                            time.sleep(0.1)
+                            # DWM1001 shell needs TWO CR within 1s to activate
+                            ser.write(b'\r')
+                            time.sleep(0.05)
+                            ser.write(b'\r')
+                            time.sleep(0.3)   # wait for dwm> prompt
                             ser.reset_input_buffer()
                             polling = True
                             last_poll = 0.0
 
                         # les starts a continuous stream — only re-send if stream died
+                        # Use \r only (CR): sending \r\n would send a second Enter
+                        # which DWM1001 interprets as stopping the les stream.
                         if polling and now - last_data > LES_RESEND and now - last_poll >= LES_RESEND:
-                            ser.write(b'les\r\n')
+                            ser.write(b'les\r')
                             last_poll = now
 
                         raw_bytes = ser.readline()
