@@ -222,10 +222,14 @@ class UWBTag:
         ts = int(time.time() * 1e6)  # microseconds, as reference impl does
         with self._lock:
             yaw = self._ekf_yaw
-        # z=0: baro(EK3_SRC1_POSZ=1)가 고도 담당 — UWB z 무시
-        self.conn.mav.vision_position_estimate_send(
-            ts, x, y, 0.0, 0.0, 0.0, yaw, cov, 0,
-        )
+        try:
+            # z=0: baro(EK3_SRC1_POSZ=1)가 고도 담당 — UWB z 무시
+            self.conn.mav.vision_position_estimate_send(
+                ts, x, y, 0.0, 0.0, 0.0, yaw, cov, 0,
+            )
+        except Exception as e:
+            print(f"[UWB] vision send error: {e}")
+            return
         self._dbg_cnt += 1
         if self._dbg_cnt % 10 == 0:
             print(f"  [UWB] vision #{self._dbg_cnt}"
@@ -344,14 +348,18 @@ class UWBTag:
     def _send_global_origin(self):
         if self.conn is None:
             return
-        # 양산 부산대 실내 테스트 위치 (35.297382, 129.007889, 고도 ~40m MSL)
-        lat = int(35.297382 * 1e7)
-        lon = int(129.007889 * 1e7)
-        alt = int(40 * 1000)   # mm 단위
         self.conn.mav.set_gps_global_origin_send(
-            self.conn.target_system, lat, lon, alt,
+            self.conn.target_system, 0, 0, 0,
         )
-        print(f"[UWB] global origin sent: lat={35.297382} lon={129.007889} alt=40m")
+        self.conn.mav.set_home_position_send(
+            self.conn.target_system,
+            0, 0, 0,
+            0.0, 0.0, 0.0,
+            [1, 0, 0, 0],
+            0.0, 0.0, 0.0,
+            int(time.time() * 1e3),
+        )
+        print("[UWB] global origin + home position sent")
 
 
 # ── standalone visualizer ─────────────────────────────────────────────────────
