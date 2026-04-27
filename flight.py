@@ -23,15 +23,21 @@ def _cmd(c, cmd, *p):
 
 
 def _vision_loop(c, uwb, stop):
-    """20Hz로 UWB XY를 VISION_POSITION_ESTIMATE 전송. Z 분산=9999 → 바로미터 전담."""
+    """20Hz로 UWB XY를 VISION_POSITION_ESTIMATE 전송.
+    EK3_SRC1_YAW=6(ExternalNav)이므로 현재 EKF yaw를 에코백해 드리프트 방지.
+    Z 분산=9999 → 바로미터 전담."""
     cov = [0.0] * 21
     cov[0] = cov[6] = 0.01   # XY 분산 (0.1m σ)
     cov[11] = 9999.0          # Z 분산 무한대 → EKF Z 무시
+    yaw = 0.0
     while not stop.is_set():
+        att = c.recv_match(type='ATTITUDE', blocking=False)
+        if att:
+            yaw = att.yaw
         xy = uwb.get_xy()
         if xy:
             c.mav.vision_position_estimate_send(
-                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, 0, cov, 0)
+                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov, 0)
         time.sleep(0.05)
 
 
