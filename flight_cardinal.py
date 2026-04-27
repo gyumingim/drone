@@ -817,7 +817,7 @@ def _draw_sensors(ax, uwb):
 def _draw_log(ax):
     """Panel: 비행 로그 전체 — 줄별 색상 코딩."""
     ax.cla()
-    ax.set_title("Flight Log")
+    ax.set_title(f"Flight Log  [{time.strftime('%H:%M:%S')}]")
     ax.axis('off')
 
     with _flight_log_lock:
