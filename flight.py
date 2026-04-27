@@ -44,19 +44,15 @@ def _vision_loop(c, uwb, stop):
     cov = [0.0] * 21
     cov[0] = cov[6] = 0.01
     cov[11] = 9999.0
-    yaw, sent = 0.0, 0
+    sent = 0
     while not stop.is_set():
-        att = c.recv_match(type='ATTITUDE', blocking=False)
-        if att:
-            yaw = att.yaw
         xy = uwb.get_xy()
         if xy:
             c.mav.vision_position_estimate_send(
-                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov, 0)
+                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, 0.0, cov, 0)
             sent += 1
             if sent % 20 == 0:
-                print(f'[VIS] {_ts()} xy=({xy[0]:.3f},{xy[1]:.3f}) '
-                      f'yaw={yaw:.3f}rad total={sent}')
+                print(f'[VIS] {_ts()} xy=({xy[0]:.3f},{xy[1]:.3f}) yaw=0.0 total={sent}')
         time.sleep(0.05)
 
 
