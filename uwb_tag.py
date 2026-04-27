@@ -324,7 +324,6 @@ class UWBTag:
                                 self._origin = (x, y, z_abs)
                                 print(f"[UWB] origin locked: "
                                       f"({x:.2f},{y:.2f},{z_abs:.2f})")
-                                self._send_global_origin()
 
                             ox, oy, oz = self._origin
                             rel_x = x - ox
