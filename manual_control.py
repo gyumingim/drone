@@ -279,44 +279,30 @@ def hold(conn, x, y, z, duration, uwb=None):
     return True
 
 
-_VEL_ONLY = (
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
-)
+def takeoff(conn, alt=TAKEOFF_ALT):
+    """Takeoff using MAV_CMD_NAV_TAKEOFF then wait for altitude."""
+    conn.mav.command_long_send(
+        conn.target_system, conn.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, float('nan'),   # min_pitch, empty, empty, yaw
+        0, 0, alt,               # lat, lon, altitude (m above home)
+    )
+    flog(f"TAKEOFF cmd sent, target={alt}m")
+    ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+    if ack:
+        flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
+    else:
+        flog("TAKEOFF: no ACK — FC may not be ready")
 
-
-def takeoff(conn, alt=TAKEOFF_ALT, climb_rate=CLIMB_RATE):
-    """Velocity-controlled slow takeoff. climb_rate m/s upward."""
-    flog(f"TAKEOFF: target={alt}m  rate={climb_rate}m/s")
     _tset(phase='takeoff')
-
     start_z = None
     last_log = 0.0
     last_servo = 0.0
-    deadline = time.time() + (alt / climb_rate) * 3
-
+    deadline = time.time() + alt / CLIMB_RATE * 5
     while time.time() < deadline:
-        # keep sending upward velocity at climb_rate
-        conn.mav.set_position_target_local_ned_send(
-            0,
-            conn.target_system, conn.target_component,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            _VEL_ONLY,
-            0, 0, 0,
-            0, 0, -climb_rate,   # NED: negative z = upward
-            0, 0, 0,
-            0, 0,
-        )
-
         msg = conn.recv_match(
             type=['LOCAL_POSITION_NED', 'SERVO_OUTPUT_RAW', 'HEARTBEAT'],
-            blocking=True, timeout=0.1,
+            blocking=True, timeout=0.5,
         )
         if msg is None:
             continue
@@ -349,6 +335,11 @@ def takeoff(conn, alt=TAKEOFF_ALT, climb_rate=CLIMB_RATE):
                     f"TAKEOFF: start_z={start_z:.2f}m  "
                     f"need z<{threshold:.2f}m  (Δ≥{alt-TOLERANCE:.1f}m)"
                 )
+                if start_z < -(alt - 0.2):
+                    flog(
+                        f"  WARNING: start_z={start_z:.2f}m already below "
+                        f"target {threshold:.2f}m — baro drift detected!"
+                    )
             threshold = start_z - (alt - TOLERANCE)
             now2 = time.time()
             if now2 - last_log > 1.0:
