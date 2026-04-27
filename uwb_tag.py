@@ -222,8 +222,9 @@ class UWBTag:
         ts = int(time.time() * 1e6)  # microseconds, as reference impl does
         with self._lock:
             yaw = self._ekf_yaw
+        # z=0: baro(EK3_SRC1_POSZ=1)가 고도 담당 — UWB z 무시
         self.conn.mav.vision_position_estimate_send(
-            ts, x, y, z, 0.0, 0.0, yaw, cov, 0,
+            ts, x, y, 0.0, 0.0, 0.0, yaw, cov, 0,
         )
         self._dbg_cnt += 1
         if self._dbg_cnt % 10 == 0:
