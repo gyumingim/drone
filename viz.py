@@ -286,14 +286,25 @@ def takeoff(conn, alt=TAKEOFF_ALT):
         0, 0, 0, float('nan'), 0, 0, alt,
     )
     flog(f"TAKEOFF cmd sent, target={alt}m")
-    ack = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+    # Wait specifically for the TAKEOFF command ACK; skip stale ACKs for ARM/MODE
+    ack = None
+    deadline_ack = time.time() + 3.0
+    while time.time() < deadline_ack:
+        msg = conn.recv_match(type='COMMAND_ACK', blocking=True, timeout=0.5)
+        if msg is None:
+            continue
+        cmd_id = getattr(msg, 'command', None)
+        if cmd_id == mavutil.mavlink.MAV_CMD_NAV_TAKEOFF:
+            ack = msg
+            break
+        flog(f"[TAKEOFF] skip stale ACK cmd={cmd_id} result={msg.result}")
     if ack:
         flog(f"TAKEOFF ACK: {'OK' if ack.result==0 else 'FAIL'} (result={ack.result})")
         if ack.result != 0:
             flog("TAKEOFF rejected by FC — aborting")
             return None
     else:
-        flog("TAKEOFF: no ACK")
+        flog("TAKEOFF: no ACK (timeout)")
 
     _tset(phase='takeoff')
     start_z = None
