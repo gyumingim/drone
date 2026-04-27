@@ -110,7 +110,7 @@ def parse_line(line: str):
 def trilaterate_z_constrained(anchor_info: dict) -> tuple | None:
     """
     anchor_info: {anchor_id: {'pos': (ax,ay,az), 'dist_m': float}}
-    Returns (x, y, z) with z guaranteed below all anchor heights.
+    Returns (x, y, z) with z >= 0 (drone is always above floor).
     """
     pts = np.array([v['pos']   for v in anchor_info.values()])
     dst = np.array([v['dist_m'] for v in anchor_info.values()])
@@ -120,20 +120,16 @@ def trilaterate_z_constrained(anchor_info: dict) -> tuple | None:
 
     x0 = float(np.mean(pts[:, 0]))
     y0 = float(np.mean(pts[:, 1]))
-    # start well below anchors → least_squares converges to the lower root
-    z0 = float(np.min(pts[:, 2])) - 1.5
+    z0 = float(np.max(pts[:, 2])) + 1.0  # start above anchors
 
     def residuals(p):
         return np.linalg.norm(pts - p, axis=1) - dst
 
-    r = least_squares(residuals, [x0, y0, z0], method='lm')
+    # z >= 0: 드론은 항상 바닥 위, 지하 거울해 차단
+    r = least_squares(residuals, [x0, y0, z0], method='trf',
+                      bounds=([-np.inf, -np.inf, 0.0],
+                               [ np.inf,  np.inf, np.inf]))
     x, y, z = r.x
-
-    # safety clamp: if solver drifted above anchors, mirror it down
-    anchor_z_min = float(np.min(pts[:, 2]))
-    if z > anchor_z_min:
-        z = anchor_z_min - abs(z - anchor_z_min)
-
     return float(x), float(y), float(z)
 
 
@@ -156,13 +152,19 @@ class UWBTag:
         self._thread = None
 
         self._origin   = None      # (x, y, z) at first fix
-        self._pos_rel  = None      # (dx, dy, dz) relative to origin
-        self._pos_abs  = None      # (x, y, z) absolute UWB frame
+        self._pos_rel  = None      # (dx, dy, dz) relative to origin, NED (z neg=up)
+        self._pos_abs  = None      # (x, y, z) absolute UWB frame, z-up (z pos=up)
         self._anchors  = {}        # {id: {'pos': ..., 'dist_m': ...}} last batch
         self._fw_pos   = None      # (x, y, z, qf) firmware estimate
         self._trail    = deque(maxlen=TRAIL_LEN)
         self._ts       = 0.0
         self._dbg_cnt  = 0
+        self._ekf_yaw  = 0.0      # updated by flight thread via set_yaw()
+        # fw_pos z cache: trilateration z is unreliable above anchor height,
+        # so we always use fw_pos z.  Keep the last good value for up to 2 s
+        # in case fw_pos is temporarily absent between ranging cycles.
+        self._last_fw_z: float | None = None
+        self._last_fw_z_ts: float = 0.0
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -173,6 +175,10 @@ class UWBTag:
 
     def stop(self):
         self._stop.set()
+
+    def set_yaw(self, yaw_rad: float) -> None:
+        with self._lock:
+            self._ekf_yaw = yaw_rad
 
     def get_drone_pos(self):
         """Returns (x, y, z) relative to origin (ENU), or None."""
@@ -209,14 +215,21 @@ class UWBTag:
         cov = [0.0] * 21
         cov[0]  = 0.01   # x variance (0.1m std)
         cov[6]  = 0.01   # y variance
-        cov[11] = 0.01   # z variance
+        cov[11] = 9999.0  # z variance 무한대 → EKF가 VISION z 무시 (baro 전담)
         cov[15] = 0.1    # roll variance (unused — we send 0)
         cov[18] = 0.1    # pitch variance
         cov[20] = 0.1    # yaw variance
         ts = int(time.time() * 1e6)  # microseconds, as reference impl does
-        self.conn.mav.vision_position_estimate_send(
-            ts, x, y, 0.0, 0.0, 0.0, 0.0, cov, 0,
-        )
+        with self._lock:
+            yaw = self._ekf_yaw
+        try:
+            # z=0: baro(EK3_SRC1_POSZ=1)가 고도 담당 — UWB z 무시
+            self.conn.mav.vision_position_estimate_send(
+                ts, x, y, 0.0, 0.0, 0.0, yaw, cov, 0,
+            )
+        except Exception as e:
+            print(f"[UWB] vision send error: {e}")
+            return
         self._dbg_cnt += 1
         if self._dbg_cnt % 10 == 0:
             print(f"  [UWB] vision #{self._dbg_cnt}"
@@ -228,7 +241,7 @@ class UWBTag:
         rx = ok = 0
         last_stat = time.time()
         NO_DATA_TIMEOUT = 3.0   # seconds before falling back to les polling
-        POLL_HZ = 5
+        LES_RESEND = 2.0        # re-send les only if stream dies
 
         while not self._stop.is_set():
             try:
@@ -249,8 +262,10 @@ class UWBTag:
                             time.sleep(0.1)
                             ser.reset_input_buffer()
                             polling = True
+                            last_poll = 0.0
 
-                        if polling and now - last_poll >= 1.0 / POLL_HZ:
+                        # les starts a continuous stream — only re-send if stream died
+                        if polling and now - last_data > LES_RESEND and now - last_poll >= LES_RESEND:
                             ser.write(b'les\r\n')
                             last_poll = now
 
@@ -286,26 +301,30 @@ class UWBTag:
                         if not all(math.isfinite(v) for v in pos):
                             continue
 
-                        x, y, z = pos
+                        x, y, _ = pos
+                        # z: trilateration (z>=0 bound enforces upper solution).
+                        # fw_pos z is unreliable when all anchors are below the
+                        # drone — DWM firmware finds the same mirror solution.
+                        z_abs = pos[2]   # guaranteed >= 0 by least_squares bound
                         now = time.time()
 
                         with self._lock:
-                            self._pos_abs = (x, y, z)
+                            self._pos_abs = (x, y, z_abs)
                             self._fw_pos  = fw_pos
                             self._ts      = now
                             self._trail.append((x, y))
                             self._anchors = anchor_info
 
                             if self._origin is None:
-                                self._origin = (x, y, z)
+                                self._origin = (x, y, z_abs)
                                 print(f"[UWB] origin locked: "
-                                      f"({x:.2f},{y:.2f},{z:.2f})")
+                                      f"({x:.2f},{y:.2f},{z_abs:.2f})")
                                 self._send_global_origin()
 
                             ox, oy, oz = self._origin
                             rel_x = x - ox
                             rel_y = y - oy
-                            rel_z = -(z - oz)
+                            rel_z = -(z_abs - oz)
                             self._pos_rel = (rel_x, rel_y, rel_z)
 
                         self._inject_vision(rel_x, rel_y, rel_z)
@@ -317,8 +336,9 @@ class UWBTag:
                                   if fw_pos else "fw=N/A")
                             print(f"[UWB] rx={rx} ok={ok} "
                                   f"anchors={len(anchor_info)} "
-                                  f"trilat=({x:.2f},{y:.2f},{z:.2f}) "
-                                  f"height={-z:.2f}m  {fw}")
+                                  f"trilat_xy=({x:.2f},{y:.2f}) "
+                                  f"trilat_z={pos[2]:.2f} fw_z={z_abs:.2f} "
+                                  f"height={z_abs:.2f}m  {fw}")
                             last_stat = now2
 
             except serial.SerialException as e:
@@ -328,17 +348,15 @@ class UWBTag:
     def _send_global_origin(self):
         if self.conn is None:
             return
-        # lat=0 lon=0 alt=0 — dummy indoor origin
         self.conn.mav.set_gps_global_origin_send(
             self.conn.target_system, 0, 0, 0,
         )
-        # also send SET_HOME_POSITION — required by some FC builds
         self.conn.mav.set_home_position_send(
             self.conn.target_system,
-            0, 0, 0,        # lat, lon, alt (int32 * 1e7 / mm)
-            0.0, 0.0, 0.0,  # local NED position
-            [1, 0, 0, 0],   # quaternion (identity)
-            0.0, 0.0, 0.0,  # approach vector
+            0, 0, 0,
+            0.0, 0.0, 0.0,
+            [1, 0, 0, 0],
+            0.0, 0.0, 0.0,
             int(time.time() * 1e3),
         )
         print("[UWB] global origin + home position sent")
@@ -365,9 +383,9 @@ def _update(frame, ax_info, ax_map, uwb):
         fw = info.get('fw_pos')
         fw_str = (f"fw:     ({fw[0]:+.3f}, {fw[1]:+.3f}, {fw[2]:+.3f}) qf={fw[3]}"
                   if fw else "fw:     N/A")
-        dz = abs(-info['z'] - (-fw[2])) if fw else 0.0
+        dz = abs(info['z'] - fw[2]) if fw else 0.0   # both z-up, no negation
         pos_lines = [
-            f"Trilat: ({info['x']:+.3f}, {info['y']:+.3f}, {-info['z']:+.3f}m)",
+            f"Trilat: ({info['x']:+.3f}, {info['y']:+.3f}, {info['z']:+.3f}m)",
             fw_str,
             f"ΔZ (trilat vs fw): {dz:.3f} m",
             f"Age:    {age:.2f} s",
@@ -420,7 +438,7 @@ def _update(frame, ax_info, ax_map, uwb):
                 markeredgewidth=1.5, zorder=10)
     ax_map.text(info['x'] + 0.1, info['y'] + 0.1,
                 f"({info['x']:.2f}, {info['y']:.2f})\n"
-                f"H={-info['z']:.2f}m",
+                f"H={info['z']:.2f}m",
                 fontsize=8, color=mc)
 
     all_x = [info['x']] + [v['pos'][0] for v in info['anchors'].values()]
