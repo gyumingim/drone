@@ -397,7 +397,11 @@ def debug_status(conn, uwb, duration=15):
 
 # ── heartbeat + telem collection ──────────────────────────────────────────────
 
+_vision_log_ts = 0.0   # last time we logged VISION content
+
+
 def _heartbeat_loop(conn, stop_evt, uwb):
+    global _vision_log_ts
     while not stop_evt.is_set():
         try:
             conn.mav.heartbeat_send(
@@ -410,7 +414,7 @@ def _heartbeat_loop(conn, stop_evt, uwb):
         for _ in range(20):
             msg = conn.recv_match(
                 type=['VFR_HUD', 'ATTITUDE', 'LOCAL_POSITION_NED',
-                      'EKF_STATUS_REPORT', 'SERVO_OUTPUT_RAW'],
+                      'EKF_STATUS_REPORT', 'SERVO_OUTPUT_RAW', 'STATUSTEXT'],
                 blocking=False,
             )
             if msg is None:
@@ -441,8 +445,6 @@ def _heartbeat_loop(conn, stop_evt, uwb):
                     _ekf_prev_flags = new_flags
                     pr_new = bool(new_flags & _EKF_POS_REL)
                     pa_new = bool(new_flags & _EKF_POS_ABS)
-                    pr_old = bool(old_flags & _EKF_POS_REL) if old_flags is not None else None
-                    pa_old = bool(old_flags & _EKF_POS_ABS) if old_flags is not None else None
                     ok_new = (new_flags & _EKF_NEED) == _EKF_NEED
                     ok_old = (old_flags & _EKF_NEED) == _EKF_NEED if old_flags is not None else None
                     if not ok_new:
@@ -454,6 +456,32 @@ def _heartbeat_loop(conn, stop_evt, uwb):
             elif t == 'SERVO_OUTPUT_RAW':
                 _tset(servo=(msg.servo1_raw, msg.servo2_raw,
                              msg.servo3_raw, msg.servo4_raw))
+            elif t == 'STATUSTEXT':
+                text = msg.text.strip()
+                # EKF / navigation 관련 메시지만 필터링
+                tl = text.lower()
+                if any(k in tl for k in ('ekf', 'nav', 'vision', 'extern', 'gps',
+                                          'yaw', 'compass', 'pos', 'aiding',
+                                          'origin', 'field elev')):
+                    sev = getattr(msg, 'severity', 6)
+                    tag = '[FC!!]' if sev <= 3 else '[FC]'
+                    flog(f"{tag} {text}")
+
+        # VISION 전송 내용 5초마다 로그
+        now = time.time()
+        if now - _vision_log_ts >= 5.0:
+            _vision_log_ts = now
+            drone_pos = uwb.get_drone_pos()
+            with _telem_lock:
+                yaw_r = _telem.get('yaw_rad')
+            vis_n = getattr(uwb, '_dbg_cnt', 0)
+            if drone_pos:
+                x, y, _ = drone_pos
+                yaw_d = math.degrees(yaw_r) if yaw_r is not None else float('nan')
+                flog(f"[VISION] x={x:+.3f} y={y:+.3f} yaw={yaw_d:+.1f}° vis#{vis_n}")
+            else:
+                flog(f"[VISION] NO UWB DATA  vis#{vis_n}")
+
         time.sleep(1.0)
 
 
