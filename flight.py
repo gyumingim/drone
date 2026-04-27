@@ -68,12 +68,29 @@ def _hb_loop(c, stop):
         time.sleep(1)
 
 
+def _rc_override_loop(c, stop):
+    """5Hz RC override — RC 수신기 없을 때 failsafe 방지.
+    ch3(스로틀)=1000 (FS_THR_VALUE=975 초과), ch8=1500 (LAND 모드 미발동)."""
+    while not stop.is_set():
+        try:
+            c.mav.rc_channels_override_send(
+                c.target_system, c.target_component,
+                1500, 1500, 1000, 1500,   # ch1-4: roll/pitch/thr/yaw
+                1500, 1500, 1500, 1500)   # ch5-8: aux 전부 mid
+        except Exception as e:
+            print(f'[RC-OVR] {_ts()} 오류: {e}')
+        time.sleep(0.2)
+
+
 def _status_loop(c, stop):
     while not stop.is_set():
-        m = c.recv_match(type='STATUSTEXT', blocking=False)
-        if m:
-            sev = _SEV[m.severity] if m.severity < len(_SEV) else str(m.severity)
-            print(f'[FC-MSG] {_ts()} [{sev}] {m.text}')
+        try:
+            m = c.recv_match(type='STATUSTEXT', blocking=False)
+            if m:
+                sev = _SEV[m.severity] if m.severity < len(_SEV) else str(m.severity)
+                print(f'[FC-MSG] {_ts()} [{sev}] {m.text}')
+        except Exception as e:
+            print(f'[FC-MSG] {_ts()} 오류: {e}')
         time.sleep(0.05)
 
 
@@ -107,10 +124,11 @@ def main():
 
     # ── 백그라운드 쓰레드 ────────────────────────────────────────────────
     stop = threading.Event()
-    threading.Thread(target=_vision_loop,  args=(c, uwb, stop), daemon=True).start()
-    threading.Thread(target=_hb_loop,      args=(c, stop),      daemon=True).start()
-    threading.Thread(target=_status_loop,  args=(c, stop),      daemon=True).start()
-    print(f'[THREAD] {_ts()} vision / heartbeat / statustext 쓰레드 시작')
+    threading.Thread(target=_vision_loop,     args=(c, uwb, stop), daemon=True).start()
+    threading.Thread(target=_hb_loop,         args=(c, stop),      daemon=True).start()
+    threading.Thread(target=_rc_override_loop, args=(c, stop),     daemon=True).start()
+    threading.Thread(target=_status_loop,     args=(c, stop),      daemon=True).start()
+    print(f'[THREAD] {_ts()} vision / heartbeat / rc_override / statustext 쓰레드 시작')
     time.sleep(1)
 
     # ── EKF 준비 대기 ────────────────────────────────────────────────────
