@@ -413,7 +413,7 @@ def _heartbeat_loop(conn, stop_evt, uwb):
 
 # ── CLI dashboard ─────────────────────────────────────────────────────────────
 
-_TW = 82   # total terminal width
+_TW = 92   # total terminal width
 _IW = _TW - 2   # inner width (between outer │ chars)
 
 # 3 columns: C1 | C2 | C3  (widths sum to _IW - 2 separators)
@@ -594,7 +594,9 @@ def _render(uwb, title):
             c3.append('')
         c3.append(' Anchors:')
         for aid, av in sorted(info.get('anchors', {}).items()):
-            c3.append(f"  {aid}: {av['dist_m']:.3f}m")
+            ax, ay, az = av['pos']
+            c3.append(f"  {aid}: {av['dist_m']:.3f}m"
+                      f" ({ax:.2f},{ay:.2f},{az:.2f})")
     else:
         c3.append(' NO TAGS')
         c3 += [''] * 6
