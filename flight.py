@@ -50,6 +50,14 @@ def _hb_loop(c, stop):
         time.sleep(1)
 
 
+def _status_loop(c, stop):
+    """STATUSTEXT 수신 → 실시간 출력 (FC 경고/에러 진단용)."""
+    while not stop.is_set():
+        m = c.recv_match(type='STATUSTEXT', blocking=True, timeout=0.5)
+        if m:
+            print(f'[FC] {m.severity} {m.text}')
+
+
 def main():
     # UWB 시작 + origin 대기
     uwb = UWBReader()
@@ -75,6 +83,7 @@ def main():
     stop = threading.Event()
     threading.Thread(target=_vision_loop, args=(c, uwb, stop), daemon=True).start()
     threading.Thread(target=_hb_loop,    args=(c, stop),       daemon=True).start()
+    threading.Thread(target=_status_loop, args=(c, stop),      daemon=True).start()
     time.sleep(1)
 
     # EKF 준비 대기
