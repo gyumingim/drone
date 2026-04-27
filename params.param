@@ -1,0 +1,35 @@
+# ArduPilot EKF3 — UWB XY + Barometer Z
+# QGC: Parameters > Tools > Load from file
+
+# 기체 기본
+FRAME_CLASS,1
+FRAME_TYPE,1
+BRD_SAFETYENABLE,0
+BRD_SAFETY_DEFLT,0
+
+# GPS 비활성화 (실내 UWB)
+GPS_TYPE,0
+ARMING_CHECK,0
+
+# EKF3 활성화
+AHRS_EKF_TYPE,3
+EK2_ENABLE,0
+EK3_ENABLE,1
+
+# 위치 소스
+# POSXY=6: ExternalNav(UWB vision_position_estimate)
+# POSZ=1:  Barometer  ← 핵심 변경
+# YAW=1:   Compass
+EK3_SRC1_POSXY,6
+EK3_SRC1_POSZ,1
+EK3_SRC1_VELXY,0
+EK3_SRC1_VELZ,0
+EK3_SRC1_YAW,1
+
+# VISION_POSITION_ESTIMATE 수신 활성화 (없으면 메시지 무시됨)
+VISO_TYPE,1
+
+# 실내 안전 설정
+FS_GCS_ENABLE,0
+PILOT_SPEED_UP,50
+RTL_ALT,200
