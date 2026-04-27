@@ -429,6 +429,7 @@ def _heartbeat_loop(conn, stop_evt, uwb):
                     _telem['yaw_rad']   = msg.yaw
                     _telem['roll_rad']  = msg.roll
                     _telem['pitch_rad'] = msg.pitch
+                uwb.set_yaw(msg.yaw)
             elif t == 'LOCAL_POSITION_NED':
                 _tset(ned_x=msg.x, ned_y=msg.y, ned_z=msg.z)
             elif t == 'EKF_STATUS_REPORT':
