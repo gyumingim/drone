@@ -94,13 +94,15 @@ def _hb_loop(c, stop):
 
 
 def _rc_override_loop(c, stop):
-    """5Hz RC override — RC 수신기 없을 때 failsafe 방지."""
+    """5Hz RC override — ch3만 1000으로 throttle failsafe 방지.
+    나머지 채널은 0(release) → 물리적 RC 조종기 입력 통과.
+    ref: mavlink.io RC_CHANNELS_OVERRIDE, value=0 means release to RC radio."""
     while not stop.is_set():
         try:
             c.mav.rc_channels_override_send(
                 c.target_system, c.target_component,
-                1500, 1500, 1000, 1500,   # ch1-4: roll/pitch/thr/yaw
-                1500, 1500, 1500, 1500)   # ch5-8: aux 전부 mid
+                0, 0, 1000, 0,   # ch1/2/4: release, ch3: 1000 (failsafe 방지)
+                0, 0, 0, 0)      # ch5-8: release → RC 스위치 사용 가능
         except Exception as e:
             print(f'[RC-OVR] {ts()} 오류: {e}')
         time.sleep(0.2)
