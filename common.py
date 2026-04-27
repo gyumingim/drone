@@ -186,16 +186,17 @@ def do_takeoff(c, stop, takeoff_m=TAKEOFF_M):
     if result != 0:
         return False
 
-    # 목표 고도 (NED: 음수=위) 도달 + 수직 속도 안정 확인
-    target_z = -(takeoff_m - 0.2)   # 허용 마진 0.2m
+    # 목표 고도 95% 도달 대기 (DroneKit 표준 패턴)
+    # ref: github.com/dronekit/dronekit-python docs/guide/taking_off.rst
+    target_z = -(takeoff_m * 0.95)
     deadline = time.time() + 20
     while time.time() < deadline:
         m = c.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1)
         if m is None:
             continue
         print(f'[TKOF] {ts()} z={m.z:.3f} vz={m.vz:.3f} (목표 z<{target_z:.2f})')
-        if m.z < target_z and abs(m.vz) < 0.15:
-            print(f'[TKOF] {ts()} 고도 도달 안정!')
+        if m.z < target_z:
+            print(f'[TKOF] {ts()} 고도 도달!')
             return True
     print(f'[TKOF] {ts()} 타임아웃')
     return False
