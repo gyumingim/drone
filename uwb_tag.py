@@ -353,18 +353,12 @@ class UWBTag:
     def _send_global_origin(self):
         if self.conn is None:
             return
+        # 양산 부산대 실내 테스트 위치 (MSL ~40m)
+        LAT, LON, ALT_MM = 352973820, 1290078890, 40000
         self.conn.mav.set_gps_global_origin_send(
-            self.conn.target_system, 0, 0, 0,
+            self.conn.target_system, LAT, LON, ALT_MM,
         )
-        self.conn.mav.set_home_position_send(
-            self.conn.target_system,
-            0, 0, 0,
-            0.0, 0.0, 0.0,
-            [1, 0, 0, 0],
-            0.0, 0.0, 0.0,
-            int(time.time() * 1e3),
-        )
-        print("[UWB] global origin + home position sent")
+        print("[UWB] global origin sent (Yangsan 35.297382, 129.007889, alt=40m)")
 
 
 # ── standalone visualizer ─────────────────────────────────────────────────────
