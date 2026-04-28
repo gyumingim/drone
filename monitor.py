@@ -157,6 +157,7 @@ def _uwb_loop(c, uwb: UWBReader, data: DroneData, stop: threading.Event):
         data.update(
             uwb_xy=xy, uwb_age_s=age,
             uwb_total=uwb.get_stats()['total_count'],
+            uwb_error=uwb.get_error(),
         )
         time.sleep(0.05)
 

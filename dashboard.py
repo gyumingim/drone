@@ -43,6 +43,7 @@ class DroneData:
     uwb_xy:    Optional[Tuple[float, float]] = None
     uwb_age_s: float = 999.0
     uwb_total: int   = 0
+    uwb_error: Optional[str] = None
 
     # LOCAL_POSITION_NED
     pos_x:  Optional[float] = None      # North (m)
@@ -161,17 +162,16 @@ def _panel_uwb(d) -> Panel:
     t = Table.grid(padding=(0, 1))
     t.add_column(width=14); t.add_column()
 
-    if d.uwb_xy:
-        xy_text  = Text(f'({d.uwb_xy[0]:.3f}, {d.uwb_xy[1]:.3f}) m')
+    if d.uwb_error:
+        t.add_row('[bold]ERROR[/bold]', Text(d.uwb_error[:40], style='red bold'))
+    elif d.uwb_xy:
         age_style = 'red' if d.uwb_age_s > 1.0 else 'green'
-        age_text  = Text(f'{d.uwb_age_s:.2f}s', style=age_style)
+        t.add_row('[bold]XY[/bold]',    Text(f'({d.uwb_xy[0]:.3f}, {d.uwb_xy[1]:.3f}) m'))
+        t.add_row('[bold]Age[/bold]',   Text(f'{d.uwb_age_s:.2f}s', style=age_style))
+        t.add_row('[bold]Count[/bold]', Text(str(d.uwb_total)))
     else:
-        xy_text  = Text('NO SIGNAL', style='red bold blink')
-        age_text = Text('—', style='dim')
-
-    t.add_row('[bold]XY[/bold]',    xy_text)
-    t.add_row('[bold]Age[/bold]',   age_text)
-    t.add_row('[bold]Count[/bold]', Text(str(d.uwb_total)))
+        t.add_row('[bold]XY[/bold]',    Text('대기 중...', style='yellow'))
+        t.add_row('[bold]Count[/bold]', Text(str(d.uwb_total)))
     return Panel(t, title='[cyan]UWB[/cyan]', box=box.ROUNDED, padding=(0,1))
 
 

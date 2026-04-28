@@ -11,23 +11,17 @@ import serial
 
 PORT = '/dev/ttyUSB0'
 BAUD = 115200
-MIN_QUALITY  = 0     # quality factor 최소값 (0=필터 없음, 필요시 50 이상으로 올릴 것)
+MIN_QUALITY = 0  # 0=필터 없음, 필요시 50 이상으로 올릴 것
 
 
 def _parse_pos(line: str):
-    """lec 한 줄에서 POS 필드 추출.
-    반환: (x, y, z, qf) or None
-    """
+    """lec 한 줄에서 POS 필드 추출. 반환: (x, y, z, qf) or None"""
     if not line.startswith('DIST,'):
         return None
     parts = line.split(',')
     try:
         i = parts.index('POS')
-        x  = float(parts[i + 1])
-        y  = float(parts[i + 2])
-        z  = float(parts[i + 3])
-        qf = int(parts[i + 4])
-        return x, y, z, qf
+        return float(parts[i+1]), float(parts[i+2]), float(parts[i+3]), int(parts[i+4])
     except (ValueError, IndexError):
         return None
 
@@ -36,6 +30,7 @@ class UWBReader:
     """
     UWB 태그 시리얼 리더.
     get_xy() → (rel_x, rel_y) 미터, 첫 수신 위치 기준 상대값. 없으면 None.
+    get_error() → 마지막 에러 문자열. 없으면 None.
     """
 
     def __init__(self):
@@ -43,6 +38,7 @@ class UWBReader:
         self._origin      = None
         self._pos         = None
         self._total_count = 0
+        self._last_error  = None
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -51,6 +47,10 @@ class UWBReader:
         with self._lock:
             return self._pos
 
+    def get_error(self):
+        with self._lock:
+            return self._last_error
+
     def get_stats(self):
         with self._lock:
             return {'total_count': self._total_count}
@@ -58,35 +58,30 @@ class UWBReader:
     def _run(self):
         while True:
             try:
-                with serial.Serial(
-                    PORT, BAUD, timeout=1,
-                    dsrdtr=False, rtscts=False
-                ) as ser:
-                    print(f'[UWB] {PORT} 연결 (lec 이미 실행 중 가정)')
-
+                with self._lock:
+                    self._last_error = None
+                with serial.Serial(PORT, BAUD, timeout=1, dsrdtr=False, rtscts=False) as ser:
+                    print(f'[UWB] {PORT} 연결')
                     while True:
                         raw = ser.readline().decode('ascii', errors='ignore').strip()
                         if not raw:
                             continue
-
                         result = _parse_pos(raw)
                         if result is None:
                             continue
-
                         x, y, z, qf = result
                         if qf < MIN_QUALITY:
                             continue
-
-                        now = time.time()
                         with self._lock:
                             self._total_count += 1
-                        with self._lock:
                             if self._origin is None:
                                 self._origin = (x, y)
                                 print(f'[UWB] origin ({x:.2f}, {y:.2f})')
                             ox, oy = self._origin
                             self._pos = (x - ox, y - oy)
-
             except Exception as e:
-                print(f'[UWB] 에러: {e} — 3초 후 재연결')
+                msg = str(e)
+                with self._lock:
+                    self._last_error = msg
+                print(f'[UWB] 에러: {msg} — 3초 후 재연결')
                 time.sleep(3)
