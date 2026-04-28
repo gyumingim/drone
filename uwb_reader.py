@@ -101,7 +101,10 @@ class UWBReader:
     def _run(self):
         while True:
             try:
-                with serial.Serial(PORT, BAUD, timeout=1) as ser:
+                with serial.Serial(
+                    PORT, BAUD, timeout=1,
+                    dsrdtr=False, rtscts=False
+                ) as ser:
                     print(f'[UWB] {PORT} 연결 (lec 이미 실행 중 가정)')
 
                     while True:
