@@ -1,7 +1,9 @@
 pymavlink==2.4.49
-pyrealsense2==2.57.7.10387
 pupil-apriltags==1.0.4.post11
 numpy==1.26.4
 pyserial==3.5
-# opencv-python은 시스템 패키지(apt)로 설치: sudo apt install python3-opencv
-# 설치된 버전: 4.5.4
+
+# 아래 두 패키지는 pip로 설치 불가 — 시스템 패키지 사용
+# pyrealsense2: pip install pyrealsense2 (시스템 Python 전용)
+#   또는 venv 생성 시: python3 -m venv venv --system-site-packages
+# opencv: sudo apt install python3-opencv  (버전 4.5.4)
