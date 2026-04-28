@@ -15,6 +15,7 @@ from scipy.optimize import least_squares
 PORT = '/dev/ttyUSB0'
 BAUD = 115200
 MIN_ANCHORS = 3
+MAX_SPEED_MS = 2.0   # m/s — 이 속도 초과 시 측정값 버림 (드론 최대 실내 속도 기준)
 
 
 def _parse_lec(line: str):
@@ -75,6 +76,7 @@ class UWBReader:
         self._lock = threading.Lock()
         self._origin = None
         self._pos = None
+        self._last_accepted = None  # (x, y, z, t) — 마지막 수락된 3D 위치+시간
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -115,7 +117,24 @@ class UWBReader:
                         if pos is None:
                             continue
 
-                        x, y, _ = pos
+                        x, y, z = pos
+                        now = time.time()
+
+                        # 속도 필터 — 이전 수락 위치 대비 3D 속도 검사
+                        if self._last_accepted is not None:
+                            lx, ly, lz, lt = self._last_accepted
+                            dt = max(now - lt, 1e-6)
+                            dist3d = math.sqrt(
+                                (x - lx)**2 + (y - ly)**2 + (z - lz)**2
+                            )
+                            speed = dist3d / dt
+                            if speed > MAX_SPEED_MS:
+                                print(f'[UWB] 속도필터 reject: '
+                                      f'{speed:.1f}m/s '
+                                      f'({dist3d:.3f}m/{dt:.3f}s)')
+                                continue
+
+                        self._last_accepted = (x, y, z, now)
                         with self._lock:
                             if self._origin is None:
                                 self._origin = (x, y)
