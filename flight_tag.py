@@ -25,7 +25,7 @@ HOVER_ALT = TAKEOFF_M
 # VISION_POSITION_ESTIMATE covariance (21-element upper-triangular)
 # cov[0]=xx, cov[6]=yy, cov[11]=zz
 _COV_UWB = [0.0] * 21
-_COV_UWB[0] = _COV_UWB[6] = 0.05
+_COV_UWB[0] = _COV_UWB[6] = 0.25  # UWB 실측 오차 ±50cm → 0.5²=0.25
 _COV_UWB[11] = 9999.0   # z 무시 (UWB z 신뢰도 낮음)
 
 _COV_TAG = [0.0] * 21
