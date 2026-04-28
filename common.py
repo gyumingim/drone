@@ -172,7 +172,8 @@ def connect(uwb, start_vision=True):
     c.mav.request_data_stream_send(
         c.target_system, c.target_component,
         mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1)
-    c.mav.set_gps_global_origin_send(c.target_system, 0, 0, 0)
+    # alt=0 이면 1Hz로 EKF 고도 재계산 발생 → 비 0 값 필요 (단위: mm)
+    c.mav.set_gps_global_origin_send(c.target_system, 0, 0, 100000)
 
     cache = {
         'attitude':  None,

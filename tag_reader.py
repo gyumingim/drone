@@ -125,4 +125,7 @@ class TagReader:
                     self._pose = None
                 time.sleep(3)
             finally:
-                pipeline.stop()  # 재시작 전 반드시 해제 (리소스 누수 방지)
+                try:
+                    pipeline.stop()  # start 실패 시에도 안전하게 호출
+                except Exception:
+                    pass

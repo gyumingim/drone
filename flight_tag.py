@@ -39,25 +39,32 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
     """
     prev_source = None
     reset_cnt = 0
+    last_vpe = None   # (x, y, z) — 두 소스 모두 없을 때 마지막값 재전송용
 
     while not stop.is_set():
         pose = tag.get_pose()
         now = time.time()
 
+        with lock:
+            att = cache['attitude']
+        drone_yaw = att.yaw if att else 0.0  # 드론 실제 heading (compass)
+
         if pose:
-            n, e, d, yaw = pose
+            n, e, d, _ = pose  # tag yaw 미사용 — 드론 heading과 무관
 
             if prev_source != 'tag':
                 reset_cnt = (reset_cnt + 1) % 256
                 print(f'[VPE] {ts()} UWB→TAG 전환 (reset={reset_cnt})')
 
-            # 태그=(0,0) origin, 드론 위치=(-n, -e)
+            # 태그=(0,0) origin, 드론 위치=(-n,-e)
+            # yaw는 드론 compass 값 사용 (tag 회전과 무관)
             c.mav.vision_position_estimate_send(
                 int(now * 1e6),
                 -n, -e, -HOVER_ALT,
-                0.0, 0.0, yaw,
+                0.0, 0.0, drone_yaw,
                 _COV_TAG, reset_cnt)
 
+            last_vpe = (-n, -e, -HOVER_ALT)
             go_to(c, 0, 0, -HOVER_ALT)
             prev_source = 'tag'
 
@@ -69,20 +76,29 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     reset_cnt = (reset_cnt + 1) % 256
                     print(f'[VPE] {ts()} TAG→UWB 전환 (reset={reset_cnt})')
 
-                with lock:
-                    att = cache['attitude']
-                yaw = att.yaw if att else 0.0
                 c.mav.vision_position_estimate_send(
                     int(now * 1e6),
                     xy[0], xy[1], 0.0,
-                    0.0, 0.0, yaw,
+                    0.0, 0.0, drone_yaw,
                     _COV_UWB, reset_cnt)
 
+                last_vpe = (xy[0], xy[1], 0.0)
                 # EKF 수렴 후 go_to — 전환 직후엔 VPE만 보내고 다음 루프에서 홀드
                 if not switching:
                     go_to(c, xy[0], xy[1], -HOVER_ALT)
 
                 prev_source = 'uwb'
+
+            elif last_vpe:
+                # tag+UWB 둘 다 없음 → 마지막 위치를 높은 cov로 재전송 (EKF timeout 방지)
+                _cov_stale = [0.0] * 21
+                _cov_stale[0] = _cov_stale[6] = _cov_stale[11] = 9999.0
+                c.mav.vision_position_estimate_send(
+                    int(now * 1e6),
+                    last_vpe[0], last_vpe[1], last_vpe[2],
+                    0.0, 0.0, drone_yaw,
+                    _cov_stale, reset_cnt)
+                print(f'[VPE] {ts()} 소스 없음 — 마지막 위치 유지 (stale)')
 
         time.sleep(0.05)  # 20Hz
 
