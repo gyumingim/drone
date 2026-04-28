@@ -1,5 +1,7 @@
 """common.py — 공유 상수, 헬퍼, 쓰레드, 비행 시퀀스"""
-import time, threading
+import math
+import time
+import threading
 from pymavlink import mavutil
 
 FC_PORT   = '/dev/ttyACM0'
@@ -198,10 +200,16 @@ def do_takeoff(c, stop, takeoff_m=TAKEOFF_M):
     target_z = -(takeoff_m * 0.95)
     deadline = time.time() + 20
     while time.time() < deadline:
+        att = c.recv_match(type='ATTITUDE', blocking=False)
         m = c.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1)
         if m is None:
             continue
-        print(f'[TKOF] {ts()} z={m.z:.3f} vz={m.vz:.3f} (목표 z<{target_z:.2f})')
+        roll_deg  = math.degrees(att.roll)  if att else float('nan')
+        pitch_deg = math.degrees(att.pitch) if att else float('nan')
+        print(f'[TKOF] {ts()} '
+              f'z={m.z:.3f} vz={m.vz:.3f} | '
+              f'x={m.x:.3f} y={m.y:.3f} vx={m.vx:.3f} vy={m.vy:.3f} | '
+              f'roll={roll_deg:.1f}° pitch={pitch_deg:.1f}°')
         if m.z < target_z:
             print(f'[TKOF] {ts()} 고도 도달!')
             return True
