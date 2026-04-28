@@ -55,11 +55,11 @@ class TagReader:
 
     def _run(self):
         while True:
+            pipeline = rs.pipeline()
             try:
-                pipeline = rs.pipeline()
-                cfg      = rs.config()
+                cfg = rs.config()
                 cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                profile  = pipeline.start(cfg)
+                profile = pipeline.start(cfg)
 
                 intr = (profile.get_stream(rs.stream.color)
                                .as_video_stream_profile()
@@ -124,3 +124,5 @@ class TagReader:
                 with self._lock:
                     self._pose = None
                 time.sleep(3)
+            finally:
+                pipeline.stop()  # 재시작 전 반드시 해제 (리소스 누수 방지)

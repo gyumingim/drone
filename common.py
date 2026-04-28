@@ -33,8 +33,9 @@ _EKF_BITS = {
     0x200: 'gps_glitch', 0x400: 'accel_err',
 }
 
-# SET_POSITION_TARGET_LOCAL_NED: 위치만 사용
-_POS_MASK = 0b0000111111111000
+# SET_POSITION_TARGET_LOCAL_NED 위치만 사용 (ardupilot.org/dev/docs/copter-commands-in-guided-mode.html)
+# 0x0DF8 = 0b110111111000: pos사용, vel/acc/yaw무시, bit9(force)=0
+_POS_MASK = 0b0000110111111000  # 0x0DF8
 
 
 def ts():

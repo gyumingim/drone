@@ -64,11 +64,10 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         else:
             xy = uwb.get_xy()
             if xy:
-                if prev_source != 'uwb':
+                switching = prev_source != 'uwb'
+                if switching:
                     reset_cnt = (reset_cnt + 1) % 256
                     print(f'[VPE] {ts()} TAG→UWB 전환 (reset={reset_cnt})')
-                    # 현재 UWB 위치에서 홀드
-                    go_to(c, xy[0], xy[1], -HOVER_ALT)
 
                 with lock:
                     att = cache['attitude']
@@ -78,6 +77,10 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     xy[0], xy[1], 0.0,
                     0.0, 0.0, yaw,
                     _COV_UWB, reset_cnt)
+
+                # EKF 수렴 후 go_to — 전환 직후엔 VPE만 보내고 다음 루프에서 홀드
+                if not switching:
+                    go_to(c, xy[0], xy[1], -HOVER_ALT)
 
                 prev_source = 'uwb'
 
