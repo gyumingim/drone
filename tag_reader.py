@@ -1,18 +1,19 @@
 """
 tag_reader.py — RealSense D435i + AprilTag pose 추출
 
-카메라 좌표계 (렌즈 아래 장착 기준):
-  Camera X_optical = 드론 East  (오른쪽)
-  Camera Y_optical = 드론 South (뒤쪽)  ← 마운트 방향 따라 조정
-  Camera Z_optical = 드론 Down  (아래, tz ≈ 고도)
+카메라 장착: 드론 하단, 렌즈 아래, 90° 왼쪽(CCW) 회전
+  X_cam (이미지 우측) = 드론 North
+  Y_cam (이미지 하단) = 드론 East
+  Z_cam (depth)       = 드론 Down
 
 반환 pose (NED, tag 기준 상대값):
-  north = -ty  (tag이 카메라 뒤면 +N → 드론이 tag보다 north에 있다)
-  east  = +tx
+  north = +tx
+  east  = +ty
   down  = +tz  (≈ 고도, 양수)
-  yaw   = tag의 yaw in camera frame
+  yaw   = atan2(R[1,0], R[0,0]) + π/2  (90° CCW 보정)
 
   → tag 정중앙 위에 있으려면 north=0, east=0 이 되어야 함
+  → tag_test.py 로 실물 확인 필수 (방향 부호 검증)
 """
 import math
 import time
@@ -95,11 +96,12 @@ class TagReader:
                     tx, ty, tz = det.pose_t.flatten()
                     R           = det.pose_R
 
-                    # NED 변환
-                    north = -ty
-                    east  =  tx
-                    down  =  tz
-                    yaw   = math.atan2(R[1, 0], R[0, 0])
+                    # NED 변환 — 카메라 90° 왼쪽(CCW) 장착 기준
+                    # X_cam(이미지 우)=North, Y_cam(이미지 하)=East, Z_cam=Down
+                    north = tx
+                    east  = ty
+                    down  = tz
+                    yaw   = math.atan2(R[1, 0], R[0, 0]) + math.pi / 2
 
                     # 오버레이
                     for corner in det.corners.astype(int):
