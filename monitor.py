@@ -107,7 +107,7 @@ def main():
     print('[MON] 시작 (Ctrl+C 종료) — 2초마다 출력\n')
     try:
         while True:
-            time.sleep(2)
+            time.sleep(0.5)
             with _lock:
                 pos  = _cache['pos']
                 att  = _cache['att']
