@@ -30,17 +30,18 @@ MAX_VEL = 0.3       # 최대 허용 속도 (m/s) — 실내 정밀 제어용
 DEADBAND_M = 0.08   # 이 반경 내에서는 속도 0 (진동 방지)
 TAG_TOL_M = 0.10    # 도달 판정 출력 반경 (m)
 
-# velocity-only mask: pos xyz 무시, vx/vy 사용, vz/가속/yaw 무시
-_VEL_MASK = 0b11111100111  # 0x7E7
+# ArduPilot 공식 문서 velocity-only mask (ardupilot.org/dev/docs/copter-commands-in-guided-mode.html)
+# 0b110111000111 = 0xDC7 = 3527: pos xyz 무시, vx/vy/vz 사용, accel/yaw 무시
+_VEL_MASK = 0b110111000111  # 3527
 
 
 def _send_velocity(c, vx, vy):
-    """NED 속도 명령 (vz=0, 고도 유지)."""
+    """NED 속도 명령. vz=0으로 고도 유지, 10Hz 이상 재전송 필수 (3초 무입력 시 정지)."""
     c.mav.set_position_target_local_ned_send(
         0, c.target_system, c.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         _VEL_MASK,
-        0, 0, -HOVER_ALT,
+        0, 0, 0,
         vx, vy, 0,
         0, 0, 0,
         0, 0)
