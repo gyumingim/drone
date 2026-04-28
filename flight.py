@@ -12,12 +12,12 @@ def main():
         time.sleep(0.2)
     print(f'[UWB] {ts()} origin 확정: {uwb.get_xy()}')
 
-    c, stop = connect(uwb)
+    c, stop, cache, lock = connect(uwb)
     if c is None:
         return
 
-    if not do_takeoff(c, stop):
-        do_land(c, stop)
+    if not do_takeoff(c, stop, cache, lock):
+        do_land(c, stop, cache)
         return
 
     print(f'[HOVR] {ts()} 호버 {HOVER_S}s')
@@ -28,7 +28,7 @@ def main():
             break
         time.sleep(0.5)
 
-    do_land(c, stop)
+    do_land(c, stop, cache)
 
 
 if __name__ == '__main__':
