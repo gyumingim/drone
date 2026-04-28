@@ -4,6 +4,9 @@
   _reader_loop 만 recv_match 호출 → cache dict에 저장
   나머지 스레드 / 함수는 cache에서만 읽음 → 메시지 유실 없음
 """
+import os
+os.environ['MAVLINK20'] = '1'   # covariance + reset_counter 지원 필수
+
 import math
 import time
 import threading

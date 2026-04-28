@@ -1,17 +1,14 @@
 """
-flight_tag.py — 이륙 1m → AprilTag 위 VPE 전환 + go_to 호버링
+flight_tag.py — 이륙 1m → AprilTag 위 호버링
 
-동작:
-  1. UWB origin 확정 대기
-  2. ARM → 이륙 1m
-  3. _vision_loop (20Hz):
-     - Tag 미감지: UWB → VPE (cov=0.05)
-     - Tag 감지:   Tag → VPE (cov=0.002) + go_to(tag_world)
-       최초 감지 시 tag_world = ekf_pos + (n, e) 로 anchor
-  4. Ctrl+C → 착륙
+VPE 전략:
+  - Tag 감지: tag=(0,0) origin, 드론=(-n,-e,-alt) 로 VPE 전송
+              go_to(0, 0, -alt) → 태그 정중앙 위로 수렴
+  - Tag 미감지: UWB VPE 전송 + go_to(uwb_pos) 로 현재 위치 홀드
+  - 프레임 전환 시 reset_counter 증가 → EKF가 새 좌표계 즉시 수용
 
-참조: github.com/stephendade/aprilmav (VPE 방식),
-      ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html
+참조: ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html
+      mavlink.io/en/messages/common.html#VISION_POSITION_ESTIMATE
 """
 import time
 import threading
@@ -22,23 +19,26 @@ from common import connect, do_takeoff, do_land, go_to, ts, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
 
-# VISION_POSITION_ESTIMATE covariance (21-element upper-triangular)
-# cov[0]=xx, cov[6]=yy, cov[11]=zz
+# VISION_POSITION_ESTIMATE covariance (21-element upper-triangular, m²)
+# [0]=xx [6]=yy [11]=zz  — variance = (예상오차m)²
 _COV_UWB = [0.0] * 21
-_COV_UWB[0] = _COV_UWB[6] = 0.25  # UWB 실측 오차 ±50cm → 0.5²=0.25
-_COV_UWB[11] = 9999.0   # z 무시 (UWB z 신뢰도 낮음)
+_COV_UWB[0] = _COV_UWB[6] = 0.25   # UWB ±50cm → 0.5²
+_COV_UWB[11] = 9999.0               # z 무시
 
 _COV_TAG = [0.0] * 21
-_COV_TAG[0] = _COV_TAG[6] = 0.002
-_COV_TAG[11] = 0.002    # tag는 z(고도)도 신뢰
+_COV_TAG[0] = _COV_TAG[6] = 0.002  # tag ±4.5cm → 0.045²
+_COV_TAG[11] = 0.002
 
 
 def _vision_loop(c, uwb, tag, cache, lock, stop):
-    """20Hz VPE 전송.
-    Tag 감지: tag 기준 드론 world 위치 → VPE(cov=0.002) + go_to(tag_world).
-    Tag 미감지: UWB → VPE(cov=0.05), tag_world 리셋.
+    """20Hz VPE 전송 + 프레임 전환 관리.
+
+    Tag frame:  태그=(0,0) origin, 드론=(-n,-e)
+    UWB frame:  UWB origin 기준 절대 좌표
+    프레임 전환 시 reset_counter 증가 → EKF 즉시 수렴
     """
-    tag_world = None  # (tn, te): tag의 NED world 좌표 (최초 감지 시 anchor)
+    prev_source = None
+    reset_cnt = 0
 
     while not stop.is_set():
         pose = tag.get_pose()
@@ -47,33 +47,29 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         if pose:
             n, e, d, yaw = pose
 
-            # tag world 좌표 최초 anchor (EKF 위치 + 현재 상대 오프셋)
-            if tag_world is None:
-                with lock:
-                    pos = cache['local_pos']
-                if pos:
-                    tag_world = (pos.x + n, pos.y + e)
-                    print(f'[TAG] {ts()} tag world anchor '
-                          f'({tag_world[0]:.2f}, {tag_world[1]:.2f})')
+            if prev_source != 'tag':
+                reset_cnt = (reset_cnt + 1) % 256
+                print(f'[VPE] {ts()} UWB→TAG 전환 (reset={reset_cnt})')
 
-            if tag_world:
-                # 드론 world 위치 = tag_world - 현재 상대값
-                drone_n = tag_world[0] - n
-                drone_e = tag_world[1] - e
+            # 태그=(0,0) origin, 드론 위치=(-n, -e)
+            c.mav.vision_position_estimate_send(
+                int(now * 1e6),
+                -n, -e, -HOVER_ALT,
+                0.0, 0.0, yaw,
+                _COV_TAG, reset_cnt)
 
-                c.mav.vision_position_estimate_send(
-                    int(now * 1e6),
-                    drone_n, drone_e, -HOVER_ALT,
-                    0.0, 0.0, yaw,
-                    _COV_TAG)
-
-                # tag 정중앙 위로 position setpoint 갱신
-                go_to(c, tag_world[0], tag_world[1], -HOVER_ALT)
+            go_to(c, 0, 0, -HOVER_ALT)
+            prev_source = 'tag'
 
         else:
-            tag_world = None  # tag 놓치면 다음 감지 때 재anchor
             xy = uwb.get_xy()
             if xy:
+                if prev_source != 'uwb':
+                    reset_cnt = (reset_cnt + 1) % 256
+                    print(f'[VPE] {ts()} TAG→UWB 전환 (reset={reset_cnt})')
+                    # 현재 UWB 위치에서 홀드
+                    go_to(c, xy[0], xy[1], -HOVER_ALT)
+
                 with lock:
                     att = cache['attitude']
                 yaw = att.yaw if att else 0.0
@@ -81,7 +77,9 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     int(now * 1e6),
                     xy[0], xy[1], 0.0,
                     0.0, 0.0, yaw,
-                    _COV_UWB)
+                    _COV_UWB, reset_cnt)
+
+                prev_source = 'uwb'
 
         time.sleep(0.05)  # 20Hz
 
