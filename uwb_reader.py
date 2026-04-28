@@ -102,26 +102,15 @@ class UWBReader:
         while True:
             try:
                 with serial.Serial(PORT, BAUD, timeout=1) as ser:
-                    print(f'[UWB] {PORT} 연결')
-                    # 현재 스트리밍 모드(lep/les) 탈출 후 lec 시작
-                    ser.write(b'\r\n')
-                    time.sleep(0.3)
-                    ser.reset_input_buffer()
-                    ser.write(b'lec\r\n')
-                    last = time.time()
+                    print(f'[UWB] {PORT} 연결 (lec 이미 실행 중 가정)')
 
                     while True:
                         raw = ser.readline().decode(
                             'ascii', errors='ignore'
                         ).strip()
 
-                        if not raw or raw in ('dwm>', 'lec', 'les', 'lep'):
-                            if time.time() - last > 3:
-                                ser.write(b'lec\r\n')
-                                last = time.time()
+                        if not raw:
                             continue
-
-                        last = time.time()
                         anchors = _parse_lec(raw)
                         if anchors is None:
                             continue
