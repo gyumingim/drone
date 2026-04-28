@@ -16,7 +16,7 @@ PORT = '/dev/ttyUSB0'
 BAUD = 115200
 MIN_QUALITY  = 0   # 0=필터 없음, 필요시 50 이상
 ORIGIN_SKIP  = 9   # 초기 버릴 샘플 수
-ORIGIN_COUNT = 21  # 평균 낼 샘플 수 (10~30번째)
+ORIGIN_COUNT = 50  # 평균 낼 샘플 수 (10~30번째)
 
 
 def _parse_pos(line: str):
