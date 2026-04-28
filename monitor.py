@@ -150,7 +150,7 @@ def _uwb_loop(c, uwb: UWBReader, data: DroneData, stop: threading.Event):
             yaw = data.yaw if data.yaw is not None else 0.0
             try:
                 c.mav.vision_position_estimate_send(
-                    int(now * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov, 0)
+                    int(now * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov)
             except Exception as e:
                 data.add_log(f'VPE 전송 오류: {e}', level='ERR')
         age = now - last_uwb_time if last_uwb_time else 999.0
@@ -164,7 +164,7 @@ def main():
     # UWB 시작
     uwb = UWBReader()
     uwb.start()
-    print(f'[UWB] origin 대기...')
+    print('[UWB] origin 대기...')
     t0 = time.time()
     while uwb.get_xy() is None:
         if time.time() - t0 > 10:

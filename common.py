@@ -77,7 +77,7 @@ def _vision_loop(c, uwb, stop):
         xy = uwb.get_xy()
         if xy:
             c.mav.vision_position_estimate_send(
-                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov, 0)
+                int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov)
             sent += 1
             if sent % 20 == 0:
                 print(f'[VIS] {ts()} xy=({xy[0]:.3f},{xy[1]:.3f}) '
