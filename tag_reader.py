@@ -24,7 +24,7 @@ import pyrealsense2 as rs
 from pupil_apriltags import Detector
 
 TAG_FAMILY = 'tag36h11'
-TAG_SIZE_M = 0.165   # 태그 한 변 실제 크기 (m) — 출력물에 맞게 수정
+TAG_SIZE_M = 0.16    # 태그 한 변 실제 크기 (m)
 
 
 class TagReader:

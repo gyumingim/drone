@@ -1,72 +1,89 @@
 """
-flight_tag.py — 이륙 1m → AprilTag 위 속도 제어 호버링
+flight_tag.py — 이륙 1m → AprilTag 위 VPE 전환 + go_to 호버링
 
 동작:
   1. UWB origin 확정 대기
   2. ARM → 이륙 1m
-  3. UWB → VPE (common._vision_loop 가 EKF 위치 참조 공급)
-  4. Tag 감지 시: vx = Kp*n, vy = Kp*e 속도 명령
-     Tag 미감지: vx=vy=0 (제자리 유지)
-  5. Ctrl+C → 착륙
+  3. _vision_loop (20Hz):
+     - Tag 미감지: UWB → VPE (cov=0.05)
+     - Tag 감지:   Tag → VPE (cov=0.002) + go_to(tag_world)
+       최초 감지 시 tag_world = ekf_pos + (n, e) 로 anchor
+  4. Ctrl+C → 착륙
 
-좌표계:
-  tag_reader.py 반환 (north, east, down, yaw):
-    north > 0 → tag이 드론 북쪽 → 드론을 북으로 이동해야 tag 위
-    east  > 0 → tag이 드론 동쪽 → 드론을 동으로 이동해야 tag 위
+참조: github.com/stephendade/aprilmav (VPE 방식),
+      ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html
 """
-import math
 import time
 import threading
 
-from pymavlink import mavutil
 from uwb_reader import UWBReader
 from tag_reader import TagReader
-from common import connect, do_takeoff, do_land, ts, TAKEOFF_M
+from common import connect, do_takeoff, do_land, go_to, ts, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
-CTRL_HZ = 10        # 제어 루프 주기 (Hz)
-KP = 0.4            # 비례 게인 (m/s per m)
-MAX_VEL = 0.3       # 최대 허용 속도 (m/s) — 실내 정밀 제어용
-DEADBAND_M = 0.08   # 이 반경 내에서는 속도 0 (진동 방지)
-TAG_TOL_M = 0.10    # 도달 판정 출력 반경 (m)
 
-# ArduPilot 공식 문서 velocity-only mask (ardupilot.org/dev/docs/copter-commands-in-guided-mode.html)
-# 0b110111000111 = 0xDC7 = 3527: pos xyz 무시, vx/vy/vz 사용, accel/yaw 무시
-_VEL_MASK = 0b110111000111  # 3527
+# VISION_POSITION_ESTIMATE covariance (21-element upper-triangular)
+# cov[0]=xx, cov[6]=yy, cov[11]=zz
+_COV_UWB = [0.0] * 21
+_COV_UWB[0] = _COV_UWB[6] = 0.05
+_COV_UWB[11] = 9999.0   # z 무시 (UWB z 신뢰도 낮음)
 
-
-def _send_velocity(c, vx, vy):
-    """NED 속도 명령. vz=0으로 고도 유지, 10Hz 이상 재전송 필수 (3초 무입력 시 정지)."""
-    c.mav.set_position_target_local_ned_send(
-        0, c.target_system, c.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        _VEL_MASK,
-        0, 0, 0,
-        vx, vy, 0,
-        0, 0, 0,
-        0, 0)
+_COV_TAG = [0.0] * 21
+_COV_TAG[0] = _COV_TAG[6] = 0.002
+_COV_TAG[11] = 0.002    # tag는 z(고도)도 신뢰
 
 
-def _control_loop(c, tag, stop):
-    """Tag 감지 시 속도 명령, 미감지 시 vx=vy=0."""
-    dt = 1.0 / CTRL_HZ
+def _vision_loop(c, uwb, tag, cache, lock, stop):
+    """20Hz VPE 전송.
+    Tag 감지: tag 기준 드론 world 위치 → VPE(cov=0.002) + go_to(tag_world).
+    Tag 미감지: UWB → VPE(cov=0.05), tag_world 리셋.
+    """
+    tag_world = None  # (tn, te): tag의 NED world 좌표 (최초 감지 시 anchor)
+
     while not stop.is_set():
         pose = tag.get_pose()
+        now = time.time()
+
         if pose:
-            n, e, d, _ = pose
-            dist = math.hypot(n, e)
-            if dist < DEADBAND_M:
-                _send_velocity(c, 0, 0)
-                print(f'[CTRL] {ts()} ★ 도달 (dist={dist:.2f}m) — 정지')
-            else:
-                vx = max(-MAX_VEL, min(MAX_VEL, KP * n))
-                vy = max(-MAX_VEL, min(MAX_VEL, KP * e))
-                _send_velocity(c, vx, vy)
-                print(f'[CTRL] {ts()} tag N={n:+.2f} E={e:+.2f} '
-                      f'→ vx={vx:+.2f} vy={vy:+.2f} dist={dist:.2f}m')
+            n, e, d, yaw = pose
+
+            # tag world 좌표 최초 anchor (EKF 위치 + 현재 상대 오프셋)
+            if tag_world is None:
+                with lock:
+                    pos = cache['local_pos']
+                if pos:
+                    tag_world = (pos.x + n, pos.y + e)
+                    print(f'[TAG] {ts()} tag world anchor '
+                          f'({tag_world[0]:.2f}, {tag_world[1]:.2f})')
+
+            if tag_world:
+                # 드론 world 위치 = tag_world - 현재 상대값
+                drone_n = tag_world[0] - n
+                drone_e = tag_world[1] - e
+
+                c.mav.vision_position_estimate_send(
+                    int(now * 1e6),
+                    drone_n, drone_e, -HOVER_ALT,
+                    0.0, 0.0, yaw,
+                    _COV_TAG)
+
+                # tag 정중앙 위로 position setpoint 갱신
+                go_to(c, tag_world[0], tag_world[1], -HOVER_ALT)
+
         else:
-            _send_velocity(c, 0, 0)
-        time.sleep(dt)
+            tag_world = None  # tag 놓치면 다음 감지 때 재anchor
+            xy = uwb.get_xy()
+            if xy:
+                with lock:
+                    att = cache['attitude']
+                yaw = att.yaw if att else 0.0
+                c.mav.vision_position_estimate_send(
+                    int(now * 1e6),
+                    xy[0], xy[1], 0.0,
+                    0.0, 0.0, yaw,
+                    _COV_UWB)
+
+        time.sleep(0.05)  # 20Hz
 
 
 def main():
@@ -82,8 +99,8 @@ def main():
     print(f'[TAG] {ts()} 카메라 초기화...')
     time.sleep(1)
 
-    # start_vision=True: UWB→VPE는 common._vision_loop 담당
-    c, stop, cache, lock = connect(uwb, start_vision=True)
+    # start_vision=False: VPE는 _vision_loop에서 직접 관리
+    c, stop, cache, lock = connect(uwb, start_vision=False)
     if c is None:
         return
 
@@ -91,11 +108,11 @@ def main():
         do_land(c, stop, cache)
         return
 
-    print(f'[HOVER] {ts()} 이륙 완료 — tag 감지 대기 (10Hz 속도 제어)')
+    print(f'[HOVER] {ts()} 이륙 완료 — tag 감지 대기')
 
     threading.Thread(
-        target=_control_loop,
-        args=(c, tag, stop),
+        target=_vision_loop,
+        args=(c, uwb, tag, cache, lock, stop),
         daemon=True,
     ).start()
 
