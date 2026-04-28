@@ -1,36 +1,68 @@
 """
-UWB XY reader — GrowSpace/DWM1001 les format
+UWB XY reader — DWM1001 lec (CSV) format + manual trilateration
 
-les 명령 한 번 전송 → 연속 스트림 시작.
-스트림 중에는 les 재전송 금지. 3초 데이터 없으면 재전송.
+lec format: DIST,N,AN0,id,ax,ay,az,dist,...,POS,x,y,z,qf
+POS(firmware) 무시 — 삼변측량으로 직접 계산.
 """
-import re, time, threading, serial
+import math
+import time
+import threading
 
-PORT    = '/dev/ttyUSB0'
-BAUD    = 115200
-QF_MIN  = 40
+import serial
+import numpy as np
+from scipy.optimize import least_squares
 
-# les 포맷: ... est[x,y,z,qf]
-_EST = re.compile(r'est\[([-\d.]+),([-\d.]+),([-\d.]+),(\d+)\]')
+PORT = '/dev/ttyUSB0'
+BAUD = 115200
+MIN_ANCHORS = 3
 
 
-def _parse_xy(line: str):
-    """les / DIST 라인에서 (x, y) 반환. QF 미달 또는 파싱 실패 시 None."""
-    # les 포맷
-    m = _EST.search(line)
-    if m and int(m[4]) >= QF_MIN:
-        return float(m[1]), float(m[2])
-    # DIST 포맷: DIST,N,...,POS,x,y,z[,qf]
-    if line.startswith('DIST,'):
-        p = line.split(',')
-        try:
-            i = p.index('POS')
-            qf = int(p[i + 4]) if len(p) > i + 4 else 100
-            if qf >= QF_MIN:
-                return float(p[i + 1]), float(p[i + 2])
-        except (ValueError, IndexError):
-            pass
-    return None
+def _parse_lec(line: str):
+    """DIST CSV 한 줄 파싱.
+    반환: {anchor_id: {'pos': (ax,ay,az), 'dist_m': float}} or None
+    """
+    if not line.startswith('DIST,'):
+        return None
+    parts = line.split(',')
+    try:
+        n = int(parts[1])
+        anchors = {}
+        idx = 2
+        for _ in range(n):
+            aid = parts[idx + 1]
+            ax = float(parts[idx + 2])
+            ay = float(parts[idx + 3])
+            az = float(parts[idx + 4])
+            dist = float(parts[idx + 5])
+            anchors[aid] = {'pos': (ax, ay, az), 'dist_m': dist}
+            idx += 6
+        return anchors if len(anchors) >= MIN_ANCHORS else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _trilaterate(anchors: dict):
+    """3D 삼변측량 (z≥0 bound, 드론은 항상 바닥 위).
+    반환: (x, y, z) or None
+    """
+    pts = np.array([v['pos'] for v in anchors.values()])
+    dst = np.array([v['dist_m'] for v in anchors.values()])
+
+    x0 = float(np.mean(pts[:, 0]))
+    y0 = float(np.mean(pts[:, 1]))
+    z0 = float(np.max(pts[:, 2])) + 1.0
+
+    def residuals(p):
+        return np.linalg.norm(pts - p, axis=1) - dst
+
+    r = least_squares(
+        residuals, [x0, y0, z0], method='trf',
+        bounds=([-np.inf, -np.inf, 0.0], [np.inf, np.inf, np.inf])
+    )
+    x, y, z = r.x
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        return None
+    return float(x), float(y), float(z)
 
 
 class UWBReader:
@@ -40,9 +72,9 @@ class UWBReader:
     """
 
     def __init__(self):
-        self._lock   = threading.Lock()
+        self._lock = threading.Lock()
         self._origin = None
-        self._pos    = None
+        self._pos = None
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -56,28 +88,34 @@ class UWBReader:
             try:
                 with serial.Serial(PORT, BAUD, timeout=1) as ser:
                     print(f'[UWB] {PORT} 연결')
-                    ser.write(b'les\r\n')   # 스트림 시작
+                    # 현재 스트리밍 모드(lep/les) 탈출 후 lec 시작
+                    ser.write(b'\r\n')
+                    time.sleep(0.3)
+                    ser.reset_input_buffer()
+                    ser.write(b'lec\r\n')
                     last = time.time()
 
                     while True:
-                        raw = ser.readline().decode('ascii', errors='ignore').strip()
+                        raw = ser.readline().decode(
+                            'ascii', errors='ignore'
+                        ).strip()
 
-                        if not raw:
-                            # 3초 무데이터 → 스트림 끊김, les 재전송
+                        if not raw or raw in ('dwm>', 'lec', 'les', 'lep'):
                             if time.time() - last > 3:
-                                ser.write(b'les\r\n')
+                                ser.write(b'lec\r\n')
                                 last = time.time()
                             continue
 
-                        if raw in ('dwm>', 'les', 'lec', 'lep'):
-                            continue
-
                         last = time.time()
-                        xy = _parse_xy(raw)
-                        if xy is None:
+                        anchors = _parse_lec(raw)
+                        if anchors is None:
                             continue
 
-                        x, y = xy
+                        pos = _trilaterate(anchors)
+                        if pos is None:
+                            continue
+
+                        x, y, _ = pos
                         with self._lock:
                             if self._origin is None:
                                 self._origin = (x, y)
