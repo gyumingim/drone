@@ -155,8 +155,9 @@ def _wait_ack(cache, timeout=3):
         return None
 
 
-def connect(uwb):
+def connect(uwb, start_vision=True):
     """FC 연결, EKF 준비, GUIDED 설정, ARM, 쓰레드 시작.
+    start_vision=False: _vision_loop 시작 안 함 (호출자가 직접 VPE 전송 시).
     Returns (c, stop, cache, lock) or (None, stop, None, None) on failure."""
     print(f'[FC] {ts()} {FC_PORT}@{FC_BAUD} 연결 중...')
     c = mavutil.mavlink_connection(FC_PORT, baud=FC_BAUD)
@@ -180,9 +181,10 @@ def connect(uwb):
     lock = threading.Lock()
     stop = threading.Event()
 
-    threading.Thread(target=_reader_loop,      args=(c, cache, lock, stop), daemon=True).start()
-    threading.Thread(target=_vision_loop,      args=(c, uwb, cache, lock, stop), daemon=True).start()
-    threading.Thread(target=_hb_loop,          args=(c, stop), daemon=True).start()
+    threading.Thread(target=_reader_loop, args=(c, cache, lock, stop), daemon=True).start()
+    if start_vision:
+        threading.Thread(target=_vision_loop, args=(c, uwb, cache, lock, stop), daemon=True).start()
+    threading.Thread(target=_hb_loop, args=(c, stop), daemon=True).start()
     threading.Thread(target=_rc_override_loop, args=(c, stop), daemon=True).start()
     print(f'[THREAD] {ts()} 쓰레드 시작')
     time.sleep(1)
