@@ -26,8 +26,9 @@ from common import connect, do_takeoff, do_land, ts, TAKEOFF_M
 HOVER_ALT = TAKEOFF_M
 CTRL_HZ = 10        # 제어 루프 주기 (Hz)
 KP = 0.4            # 비례 게인 (m/s per m)
-MAX_VEL = 0.5       # 최대 허용 속도 (m/s)
-TAG_TOL_M = 0.10    # 도달 판정 반경 (m)
+MAX_VEL = 0.3       # 최대 허용 속도 (m/s) — 실내 정밀 제어용
+DEADBAND_M = 0.08   # 이 반경 내에서는 속도 0 (진동 방지)
+TAG_TOL_M = 0.10    # 도달 판정 출력 반경 (m)
 
 # velocity-only mask: pos xyz 무시, vx/vy 사용, vz/가속/yaw 무시
 _VEL_MASK = 0b11111100111  # 0x7E7
@@ -53,13 +54,15 @@ def _control_loop(c, tag, stop):
         if pose:
             n, e, d, _ = pose
             dist = math.hypot(n, e)
-            vx = max(-MAX_VEL, min(MAX_VEL, KP * n))
-            vy = max(-MAX_VEL, min(MAX_VEL, KP * e))
-            _send_velocity(c, vx, vy)
-            print(f'[CTRL] {ts()} tag N={n:+.2f} E={e:+.2f} '
-                  f'→ vx={vx:+.2f} vy={vy:+.2f} '
-                  f'dist={dist:.2f}m'
-                  f'{" ★ 도달" if dist < TAG_TOL_M else ""}')
+            if dist < DEADBAND_M:
+                _send_velocity(c, 0, 0)
+                print(f'[CTRL] {ts()} ★ 도달 (dist={dist:.2f}m) — 정지')
+            else:
+                vx = max(-MAX_VEL, min(MAX_VEL, KP * n))
+                vy = max(-MAX_VEL, min(MAX_VEL, KP * e))
+                _send_velocity(c, vx, vy)
+                print(f'[CTRL] {ts()} tag N={n:+.2f} E={e:+.2f} '
+                      f'→ vx={vx:+.2f} vy={vy:+.2f} dist={dist:.2f}m')
         else:
             _send_velocity(c, 0, 0)
         time.sleep(dt)
