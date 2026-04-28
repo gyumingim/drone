@@ -199,13 +199,16 @@ def do_takeoff(c, stop, takeoff_m=TAKEOFF_M):
     # ref: github.com/dronekit/dronekit-python docs/guide/taking_off.rst
     target_z = -(takeoff_m * 0.95)
     deadline = time.time() + 20
+    last_att = None
     while time.time() < deadline:
-        att = c.recv_match(type='ATTITUDE', blocking=False)
+        tmp = c.recv_match(type='ATTITUDE', blocking=False)
+        if tmp:
+            last_att = tmp
         m = c.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1)
         if m is None:
             continue
-        roll_deg  = math.degrees(att.roll)  if att else float('nan')
-        pitch_deg = math.degrees(att.pitch) if att else float('nan')
+        roll_deg  = math.degrees(last_att.roll)  if last_att else float('nan')
+        pitch_deg = math.degrees(last_att.pitch) if last_att else float('nan')
         print(f'[TKOF] {ts()} '
               f'z={m.z:.3f} vz={m.vz:.3f} | '
               f'x={m.x:.3f} y={m.y:.3f} vx={m.vx:.3f} vy={m.vy:.3f} | '
