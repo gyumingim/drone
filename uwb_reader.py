@@ -15,7 +15,7 @@ from scipy.optimize import least_squares
 PORT = '/dev/ttyUSB0'
 BAUD = 115200
 MIN_ANCHORS = 3
-MAX_SPEED_MS = 2.0   # m/s — 이 속도 초과 시 측정값 버림 (드론 최대 실내 속도 기준)
+MAX_SPEED_MS = 10.0  # m/s — 이 속도 초과 시 측정값 버림 (UWB 노이즈 ~8m/s, 비행 이상 ~28m/s)
 
 
 def _parse_lec(line: str):
@@ -31,12 +31,22 @@ def _parse_lec(line: str):
         idx = 2
         for _ in range(n):
             aid = parts[idx + 1]
-            ax = float(parts[idx + 2])
-            ay = float(parts[idx + 3])
-            az = float(parts[idx + 4])
-            dist = float(parts[idx + 5])
+            ax  = float(parts[idx + 2])
+            ay  = float(parts[idx + 3])
+            # z는 옵션 — 다음 값이 마지막이거나 AN/POS 레이블이면 z=0 생략된 것
+            next4 = parts[idx + 4] if idx + 4 < len(parts) else ''
+            has_z = (idx + 5 < len(parts)
+                     and not next4.startswith('AN')
+                     and not next4.startswith('POS'))
+            if has_z:
+                az   = float(parts[idx + 4])
+                dist = float(parts[idx + 5])
+                idx += 6
+            else:
+                az   = 0.0
+                dist = float(parts[idx + 4])
+                idx += 5
             anchors[aid] = {'pos': (ax, ay, az), 'dist_m': dist}
-            idx += 6
         return anchors if len(anchors) >= MIN_ANCHORS else None
     except (ValueError, IndexError):
         return None
