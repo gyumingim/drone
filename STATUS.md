@@ -64,7 +64,7 @@ python3 mission.py
 |----------|------|------|
 | `monitor.py` | 동작 확인 | Rich 대시보드 정상 출력 |
 | `flight.py` | 동작 확인 | 1m 호버 후 착륙, 위치 유지 확인 |
-| `mission.py` | 미테스트 | 코드 작성 완료, 실제 비행 미확인 |
+| `mission.py` | 미테스트 | 북→동→남→서→원점 0.5m, 실제 비행 미확인 |
 
 ## 완료한 것
 - [x] UWB XY + 바로미터 Z EKF3 설정 확인
@@ -81,19 +81,40 @@ python3 mission.py
 - [x] ARM FAILED 시 즉시 종료 처리 (connect() 반환값 None 처리)
 - [x] do_takeoff() 디버그 로그 강화 (x,y,vx,vy,roll,pitch 추가)
 - [x] EKF baro 오프셋 버그 원인 파악 (리부팅으로 해결, SET_GPS_GLOBAL_ORIGIN 충돌)
+- [x] UWB 3D 속도 필터 (2m/s 초과 측정값 reject) — 비행 중 UWB 점프 방지
+- [x] 단일 리더 스레드 리팩토링 — yaw=0 고정, roll/pitch NaN 두 문제 동시 해결
+
+## 단일 리더 스레드 아키텍처 (2026-04-28 적용)
+
+**문제:** 4개 스레드가 동시에 `recv_match()` 호출 → 메시지 소비 충돌
+- `_status_loop`가 ATTITUDE 소비 → `_vision_loop`에서 yaw 항상 0
+- 비행 로그에서 `yaw=-0.000rad` 고정, `roll/pitch NaN` 지속 확인
+
+**근거:**
+- pymavlink 공식: "mavlink_connection is not thread-safe" (Google Groups)
+- DroneKit, Udacity udacidrone 동일 패턴 사용 확인
+- 시뮬레이션 검증: 멀티스레드 시 15개 중 10개 유실, 단일 리더 시 0개 유실
+
+**해결:** `_reader_loop` 단 하나만 `recv_match` 호출 → `cache` dict에 저장
+```
+cache = {
+    'attitude': ..., 'local_pos': ..., 'ekf': ...,
+    'heartbeat': ..., 'yaw': 0.0, 'ack_queue': Queue()
+}
+```
+- `_vision_loop` → `cache['yaw']` 읽기
+- `do_takeoff` → `cache['local_pos']`, `cache['attitude']` 읽기
+- `connect()` → `(c, stop, cache, lock)` 반환 (기존 `(c, stop)`에서 변경)
+- COMMAND_ACK → `Queue`로 처리 (`_wait_ack(cache)`)
 
 ## 하고 있는 것
-- [ ] 이륙 중 vy 드리프트 원인 분석 (0.1~0.34 m/s y+ 방향)
-  - 현상: 이륙 중 vy 지속적 양수, z 도달 후 안정
-  - 의심: UWB 앵커 배치 오류 / 드론 기울기 (roll/pitch NaN이라 확인 불가)
-  - 다음 단계: roll/pitch NaN 해결 → 실제 기울기 확인
+- [ ] mission.py 실제 비행 테스트 (북→동→남→서→원점 0.5m)
+- [ ] 이륙 중 vy 드리프트 원인 확인 (단일 리더 적용 후 yaw/roll/pitch 정상화되면 재분석)
 
 ## 할 것
-- [ ] roll/pitch NaN 해결 — ATTITUDE recv 타이밍 이슈 (LOCAL_POSITION_NED blocking 전에 ATTITUDE 먼저 받아야)
-- [ ] mission.py 실제 테스트 및 검증
 - [ ] wait_pos 도달 조건 튜닝 (현재 tol=0.3m)
-- [ ] 미션 확장 (동서남북 4방향 순차 이동)
 - [ ] UWB 신호 끊김 안전 로직 mission.py에도 추가
+- [ ] UWB 속도 필터 임계값 튜닝 (현재 2m/s, 비행 로그 보고 조정)
 
 ## 좌표계 정렬 주의사항
 
