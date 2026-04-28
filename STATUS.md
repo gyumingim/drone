@@ -159,5 +159,21 @@ ref: [ArduPilot Compassless Operation](https://ardupilot.org/copter/docs/common-
 | ARM ACK: FAILED | 가속도계 캘리 후 pre-arm check 강화 | ARMING_CHECK=0 설정 (GCS/Mission Planner) |
 | z=+4.587m 이륙 안됨 | SET_GPS_GLOBAL_ORIGIN(alt=0) + EEPROM 홈 고도 충돌 | FC 리부팅 (EKF baro 기준점 리셋) |
 | UWB XY 미출력 | 장치가 lep auto-stream 모드로 고정 | lec 명령 재전송 + 접속시 escape sequence 전송 |
-| roll/pitch = NaN | ATTITUDE 메시지가 LOCAL_POSITION_NED blocking 이후 도착 | 해결 예정 — non-blocking 수신 순서 조정 필요 |
-| 이륙 중 vy 드리프트 | 원인 조사 중 (UWB 앵커 오프셋 or 물리적 기울기) | roll/pitch NaN 해결 후 재확인 |
+| roll/pitch = NaN | 멀티스레드 recv_match 충돌로 ATTITUDE 소비됨 | 단일 리더 스레드로 해결 (2026-04-28) |
+| yaw=0 고정 | 동일한 멀티스레드 충돌 | 단일 리더 스레드로 해결 (2026-04-28) |
+| 비행 중 UWB 4m 점프 | 삼변측량 오류 or 신호 반사 | 3D 속도 필터 2m/s 추가 (2026-04-28) |
+| 이륙 중 vy 드리프트 | 원인 조사 중 — yaw/roll/pitch 수정 후 재비행 필요 | 미해결 |
+
+## 참고 문서 (검증된 출처)
+
+| 항목 | URL | 핵심 내용 |
+|------|-----|-----------|
+| pymavlink 스레드 안전성 | https://groups.google.com/g/mavlink/c/ZnJzT2CMN8c | thread-safe 아님, 단일 리더 스레드 공식 권장 |
+| pymavlink 가이드 | https://mavlink.io/en/mavgen_python/ | 공식 사용법 |
+| Non-GPS 위치 추정 | https://ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html | VPE 4Hz 이상, Z cov 높게 |
+| EKF3 소스 선택 | https://ardupilot.org/copter/docs/common-ekf-sources.html | EK3_SRC1_* 파라미터 |
+| RC_CHANNELS_OVERRIDE | https://mavlink.io/en/messages/common.html#RC_CHANNELS_OVERRIDE | ch=0 은 release 공식 정의 |
+| DWM1001 lec 포맷 | https://forum.qorvo.com/t/lec-command-output-in-uart-shell-mdek1001/5075 | UART lec CSV 포맷 |
+| Optitrack 예제 | https://ardupilot.org/copter/docs/common-optitrack.html | ExternalNav 설정 구조 동일 |
+
+> 전체 검증 결과: [VALIDATION.md](VALIDATION.md)
