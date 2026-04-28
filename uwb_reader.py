@@ -1,79 +1,37 @@
 """
-UWB XY reader — DWM1001 lec (CSV) format + manual trilateration
+UWB XY reader — DWM1001 lec (CSV) format, POS 필드 사용
 
 lec format: DIST,N,AN0,id,ax,ay,az,dist,...,POS,x,y,z,qf
-POS(firmware) 무시 — 삼변측량으로 직접 계산.
+POS 필드: DWM1001 펌웨어가 자체 계산한 3D 위치 + quality factor (0~100)
 """
 import math
 import time
 import threading
 
 import serial
-import numpy as np
-from scipy.optimize import least_squares
 
 PORT = '/dev/ttyUSB0'
 BAUD = 115200
-MIN_ANCHORS = 3
-MAX_SPEED_MS = 10.0  # m/s — 이 속도 초과 시 측정값 버림 (UWB 노이즈 ~8m/s, 비행 이상 ~28m/s)
+MAX_SPEED_MS = 10.0  # m/s — 이 속도 초과 시 측정값 버림 (UWB 노이즈 ~8m/s, 비행 이상값 차단)
+MIN_QUALITY  = 0     # quality factor 최소값 (0=필터 없음, 필요시 50 이상으로 올릴 것)
 
 
-def _parse_lec(line: str):
-    """DIST CSV 한 줄 파싱.
-    반환: {anchor_id: {'pos': (ax,ay,az), 'dist_m': float}} or None
+def _parse_pos(line: str):
+    """lec 한 줄에서 POS 필드 추출.
+    반환: (x, y, z, qf) or None
     """
     if not line.startswith('DIST,'):
         return None
     parts = line.split(',')
     try:
-        n = int(parts[1])
-        anchors = {}
-        idx = 2
-        for _ in range(n):
-            aid = parts[idx + 1]
-            ax  = float(parts[idx + 2])
-            ay  = float(parts[idx + 3])
-            # z는 옵션 — 다음 값이 마지막이거나 AN/POS 레이블이면 z=0 생략된 것
-            next4 = parts[idx + 4] if idx + 4 < len(parts) else ''
-            has_z = (idx + 5 < len(parts)
-                     and not next4.startswith('AN')
-                     and not next4.startswith('POS'))
-            if has_z:
-                az   = float(parts[idx + 4])
-                dist = float(parts[idx + 5])
-                idx += 6
-            else:
-                az   = 0.0
-                dist = float(parts[idx + 4])
-                idx += 5
-            anchors[aid] = {'pos': (ax, ay, az), 'dist_m': dist}
-        return anchors if len(anchors) >= MIN_ANCHORS else None
+        i = parts.index('POS')
+        x  = float(parts[i + 1])
+        y  = float(parts[i + 2])
+        z  = float(parts[i + 3])
+        qf = int(parts[i + 4])
+        return x, y, z, qf
     except (ValueError, IndexError):
         return None
-
-
-def _trilaterate(anchors: dict):
-    """3D 삼변측량 (z≥0 bound, 드론은 항상 바닥 위).
-    반환: (x, y, z) or None
-    """
-    pts = np.array([v['pos'] for v in anchors.values()])
-    dst = np.array([v['dist_m'] for v in anchors.values()])
-
-    x0 = float(np.mean(pts[:, 0]))
-    y0 = float(np.mean(pts[:, 1]))
-    z0 = float(np.max(pts[:, 2])) + 1.0
-
-    def residuals(p):
-        return np.linalg.norm(pts - p, axis=1) - dst
-
-    r = least_squares(
-        residuals, [x0, y0, z0], method='trf',
-        bounds=([-np.inf, -np.inf, 0.0], [np.inf, np.inf, np.inf])
-    )
-    x, y, z = r.x
-    if not all(math.isfinite(v) for v in (x, y, z)):
-        return None
-    return float(x), float(y), float(z)
 
 
 class UWBReader:
@@ -83,13 +41,13 @@ class UWBReader:
     """
 
     def __init__(self):
-        self._lock = threading.Lock()
-        self._origin = None
-        self._pos = None
-        self._last_accepted = None  # (x, y, z, t) — 마지막 수락된 3D 위치+시간
-        self._last_speed = 0.0     # 마지막 계산된 속도 (m/s), 거부된 것도 포함
+        self._lock         = threading.Lock()
+        self._origin       = None
+        self._pos          = None
+        self._last_accepted = None  # (x, y, z, t)
+        self._last_speed   = 0.0
         self._reject_count = 0
-        self._total_count = 0
+        self._total_count  = 0
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -118,41 +76,33 @@ class UWBReader:
                     print(f'[UWB] {PORT} 연결 (lec 이미 실행 중 가정)')
 
                     while True:
-                        raw = ser.readline().decode(
-                            'ascii', errors='ignore'
-                        ).strip()
-
+                        raw = ser.readline().decode('ascii', errors='ignore').strip()
                         if not raw:
                             continue
-                        anchors = _parse_lec(raw)
-                        if anchors is None:
+
+                        result = _parse_pos(raw)
+                        if result is None:
                             continue
 
-                        pos = _trilaterate(anchors)
-                        if pos is None:
+                        x, y, z, qf = result
+                        if qf < MIN_QUALITY:
                             continue
 
-                        x, y, z = pos
                         now = time.time()
-
                         with self._lock:
                             self._total_count += 1
 
-                        # 속도 필터 — 이전 수락 위치 대비 3D 속도 검사
                         if self._last_accepted is not None:
                             lx, ly, lz, lt = self._last_accepted
-                            dt = max(now - lt, 1e-6)
-                            dist3d = math.sqrt(
-                                (x - lx)**2 + (y - ly)**2 + (z - lz)**2
-                            )
-                            speed = dist3d / dt
+                            dt     = max(now - lt, 1e-6)
+                            dist3d = math.sqrt((x-lx)**2 + (y-ly)**2 + (z-lz)**2)
+                            speed  = dist3d / dt
                             with self._lock:
                                 self._last_speed = speed
                             if speed > MAX_SPEED_MS:
                                 with self._lock:
                                     self._reject_count += 1
-                                print(f'[UWB] 속도필터 reject: '
-                                      f'{speed:.1f}m/s '
+                                print(f'[UWB] reject: {speed:.1f}m/s '
                                       f'({dist3d:.3f}m/{dt:.3f}s)')
                                 continue
 
