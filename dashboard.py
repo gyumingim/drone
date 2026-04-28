@@ -42,6 +42,9 @@ class DroneData:
     # UWB
     uwb_xy:       Optional[Tuple[float, float]] = None
     uwb_age_s:    float = 999.0          # 마지막 UWB 갱신 경과 시간 (초)
+    uwb_speed_ms: float = 0.0            # 마지막 계산 속도 (m/s)
+    uwb_rejects:  int   = 0              # 누적 reject 횟수
+    uwb_total:    int   = 0              # 누적 총 측정 횟수
 
     # LOCAL_POSITION_NED
     pos_x:  Optional[float] = None      # North (m)
@@ -168,8 +171,17 @@ def _panel_uwb(d) -> Panel:
         xy_text  = Text('NO SIGNAL', style='red bold blink')
         age_text = Text('—', style='dim')
 
-    t.add_row('[bold]XY[/bold]',   xy_text)
-    t.add_row('[bold]Age[/bold]',  age_text)
+    speed_style = 'red bold' if d.uwb_speed_ms > 2.0 else ('yellow' if d.uwb_speed_ms > 1.0 else 'green')
+    speed_text  = Text(f'{d.uwb_speed_ms:.2f} m/s', style=speed_style)
+
+    reject_rate = (d.uwb_rejects / d.uwb_total * 100) if d.uwb_total > 0 else 0.0
+    reject_style = 'red bold' if reject_rate > 50 else ('yellow' if reject_rate > 20 else 'green')
+    reject_text = Text(f'{d.uwb_rejects}/{d.uwb_total} ({reject_rate:.0f}%)', style=reject_style)
+
+    t.add_row('[bold]XY[/bold]',      xy_text)
+    t.add_row('[bold]Age[/bold]',     age_text)
+    t.add_row('[bold]Speed[/bold]',   speed_text)
+    t.add_row('[bold]Rejects[/bold]', reject_text)
     return Panel(t, title='[cyan]UWB[/cyan]', box=box.ROUNDED, padding=(0,1))
 
 

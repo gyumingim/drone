@@ -77,6 +77,9 @@ class UWBReader:
         self._origin = None
         self._pos = None
         self._last_accepted = None  # (x, y, z, t) — 마지막 수락된 3D 위치+시간
+        self._last_speed = 0.0     # 마지막 계산된 속도 (m/s), 거부된 것도 포함
+        self._reject_count = 0
+        self._total_count = 0
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -84,6 +87,16 @@ class UWBReader:
     def get_xy(self):
         with self._lock:
             return self._pos
+
+    def get_stats(self):
+        """Returns dict: speed_ms, reject_count, total_count, accept_count."""
+        with self._lock:
+            return {
+                'speed_ms':     self._last_speed,
+                'reject_count': self._reject_count,
+                'total_count':  self._total_count,
+                'accept_count': self._total_count - self._reject_count,
+            }
 
     def _run(self):
         while True:
@@ -120,6 +133,9 @@ class UWBReader:
                         x, y, z = pos
                         now = time.time()
 
+                        with self._lock:
+                            self._total_count += 1
+
                         # 속도 필터 — 이전 수락 위치 대비 3D 속도 검사
                         if self._last_accepted is not None:
                             lx, ly, lz, lt = self._last_accepted
@@ -128,7 +144,11 @@ class UWBReader:
                                 (x - lx)**2 + (y - ly)**2 + (z - lz)**2
                             )
                             speed = dist3d / dt
+                            with self._lock:
+                                self._last_speed = speed
                             if speed > MAX_SPEED_MS:
+                                with self._lock:
+                                    self._reject_count += 1
                                 print(f'[UWB] 속도필터 reject: '
                                       f'{speed:.1f}m/s '
                                       f'({dist3d:.3f}m/{dt:.3f}s)')
