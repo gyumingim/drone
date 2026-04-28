@@ -167,7 +167,12 @@ def connect(uwb):
 
     cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
     ack = c.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-    print(f'[ARM] {ts()} ARM ACK: {_MAV_RESULT.get(getattr(ack,"result",-1),"?")}')
+    result = getattr(ack, 'result', -1)
+    print(f'[ARM] {ts()} ARM ACK: {_MAV_RESULT.get(result,"?")}')
+    if result != 0:
+        print(f'[ARM] {ts()} ARM 실패 — pre-arm check 확인 필요')
+        stop.set()
+        return None, stop
 
     t0 = time.time()
     while True:

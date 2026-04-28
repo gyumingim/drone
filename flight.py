@@ -13,6 +13,8 @@ def main():
     print(f'[UWB] {ts()} origin 확정: {uwb.get_xy()}')
 
     c, stop = connect(uwb)
+    if c is None:
+        return
 
     if not do_takeoff(c, stop):
         do_land(c, stop)
