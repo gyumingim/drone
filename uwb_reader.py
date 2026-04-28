@@ -36,7 +36,7 @@ class UWBReader:
     def __init__(self):
         self._lock        = threading.Lock()
         self._origin      = None
-        self._pos         = None
+        self._pos         = None   # (rel_x, rel_y, rel_z)
         self._total_count = 0
         self._last_error  = None
 
@@ -44,6 +44,10 @@ class UWBReader:
         threading.Thread(target=self._run, daemon=True).start()
 
     def get_xy(self):
+        with self._lock:
+            return (self._pos[0], self._pos[1]) if self._pos else None
+
+    def get_xyz(self):
         with self._lock:
             return self._pos
 
@@ -75,10 +79,10 @@ class UWBReader:
                         with self._lock:
                             self._total_count += 1
                             if self._origin is None:
-                                self._origin = (x, y)
-                                print(f'[UWB] origin ({x:.2f}, {y:.2f})')
-                            ox, oy = self._origin
-                            self._pos = (x - ox, y - oy)
+                                self._origin = (x, y, z)
+                                print(f'[UWB] origin ({x:.2f}, {y:.2f}, {z:.2f})')
+                            ox, oy, oz = self._origin
+                            self._pos = (x - ox, y - oy, z - oz)
             except Exception as e:
                 msg = str(e)
                 with self._lock:

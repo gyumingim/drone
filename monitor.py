@@ -58,7 +58,8 @@ def _uwb_loop(c, uwb, stop):
     cov[0] = cov[6] = 0.01
     cov[11] = 9999.0
     while not stop.is_set():
-        xy = uwb.get_xy()
+        xyz = uwb.get_xyz()
+        xy = (xyz[0], xyz[1]) if xyz else None
         if xy:
             with _lock:
                 att = _cache['att']
@@ -113,7 +114,7 @@ def main():
                 ekf  = _cache['ekf']
                 armed = _cache['armed']
                 mode  = _cache['mode']
-            xy = uwb.get_xy()
+            xyz = uwb.get_xyz()
 
             ts = time.strftime('%H:%M:%S')
             arm_str = 'ARMED' if armed else 'DISARMED'
@@ -122,7 +123,8 @@ def main():
             att_str = (f'roll={att.roll:.2f} pitch={att.pitch:.2f} yaw={att.yaw:.2f}'
                        if att else '없음')
             ekf_str = f'flags={ekf.flags:#06x}' if ekf else '없음'
-            uwb_str = f'({xy[0]:.3f}, {xy[1]:.3f})' if xy else f'없음 (cnt={uwb.get_stats()["total_count"]} err={uwb.get_error()})'
+            uwb_str = (f'x={xyz[0]:.3f} y={xyz[1]:.3f} z={xyz[2]:.3f}'
+                       if xyz else f'없음 (cnt={uwb.get_stats()["total_count"]} err={uwb.get_error()})')
 
             print(f'[{ts}] {arm_str}[{mode}] | NAV: {pos_str} | ATT: {att_str} | EKF: {ekf_str} | UWB: {uwb_str}')
     except KeyboardInterrupt:
