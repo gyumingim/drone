@@ -4,7 +4,6 @@ UWB XY reader — DWM1001 lec (CSV) format, POS 필드 사용
 lec format: DIST,N,AN0,id,ax,ay,az,dist,...,POS,x,y,z,qf
 POS 필드: DWM1001 펌웨어가 자체 계산한 3D 위치 + quality factor (0~100)
 """
-import math
 import time
 import threading
 
@@ -12,7 +11,6 @@ import serial
 
 PORT = '/dev/ttyUSB0'
 BAUD = 115200
-MAX_SPEED_MS = 10.0  # m/s — 이 속도 초과 시 측정값 버림 (UWB 노이즈 ~8m/s, 비행 이상값 차단)
 MIN_QUALITY  = 0     # quality factor 최소값 (0=필터 없음, 필요시 50 이상으로 올릴 것)
 
 
@@ -41,13 +39,10 @@ class UWBReader:
     """
 
     def __init__(self):
-        self._lock         = threading.Lock()
-        self._origin       = None
-        self._pos          = None
-        self._last_accepted = None  # (x, y, z, t)
-        self._last_speed   = 0.0
-        self._reject_count = 0
-        self._total_count  = 0
+        self._lock        = threading.Lock()
+        self._origin      = None
+        self._pos         = None
+        self._total_count = 0
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -57,14 +52,8 @@ class UWBReader:
             return self._pos
 
     def get_stats(self):
-        """Returns dict: speed_ms, reject_count, total_count, accept_count."""
         with self._lock:
-            return {
-                'speed_ms':     self._last_speed,
-                'reject_count': self._reject_count,
-                'total_count':  self._total_count,
-                'accept_count': self._total_count - self._reject_count,
-            }
+            return {'total_count': self._total_count}
 
     def _run(self):
         while True:
@@ -91,22 +80,6 @@ class UWBReader:
                         now = time.time()
                         with self._lock:
                             self._total_count += 1
-
-                        if self._last_accepted is not None:
-                            lx, ly, lz, lt = self._last_accepted
-                            dt     = max(now - lt, 1e-6)
-                            dist3d = math.sqrt((x-lx)**2 + (y-ly)**2 + (z-lz)**2)
-                            speed  = dist3d / dt
-                            with self._lock:
-                                self._last_speed = speed
-                            if speed > MAX_SPEED_MS:
-                                with self._lock:
-                                    self._reject_count += 1
-                                print(f'[UWB] reject: {speed:.1f}m/s '
-                                      f'({dist3d:.3f}m/{dt:.3f}s)')
-                                continue
-
-                        self._last_accepted = (x, y, z, now)
                         with self._lock:
                             if self._origin is None:
                                 self._origin = (x, y)

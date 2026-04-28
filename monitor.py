@@ -154,12 +154,9 @@ def _uwb_loop(c, uwb: UWBReader, data: DroneData, stop: threading.Event):
             except Exception as e:
                 data.add_log(f'VPE 전송 오류: {e}', level='ERR')
         age = now - last_uwb_time if last_uwb_time else 999.0
-        stats = uwb.get_stats()
         data.update(
             uwb_xy=xy, uwb_age_s=age,
-            uwb_speed_ms=stats['speed_ms'],
-            uwb_rejects=stats['reject_count'],
-            uwb_total=stats['total_count'],
+            uwb_total=uwb.get_stats()['total_count'],
         )
         time.sleep(0.05)
 
