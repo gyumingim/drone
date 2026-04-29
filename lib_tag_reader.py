@@ -66,6 +66,7 @@ class TagReader:
         self._lock = threading.Lock()
         self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
         self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
+        self._latency = (0.0, 0.0) # (detect_ms, total_ms) — 최근 프레임 측정값
         self._detector = Detector(families=TAG_FAMILY)
 
     def start(self):
@@ -81,6 +82,11 @@ class TagReader:
         """최신 오버레이 프레임 복사본 반환. 프레임 없으면 None."""
         with self._lock:
             return self._frame.copy() if self._frame is not None else None
+
+    def get_latency(self):
+        """(detect_ms, total_ms) 반환 — detect: detector.detect() 소요, total: 프레임→pose 전체."""
+        with self._lock:
+            return self._latency
 
     def _run(self):
         """카메라 캡처 루프. 예외 발생 시 pipeline을 재시작해 자동 복구."""
@@ -148,6 +154,8 @@ class TagReader:
                     )
                     detect_ms = (time.time() - t_detect) * 1000
                     total_ms = (time.time() - t_frame) * 1000
+                    with self._lock:
+                        self._latency = (detect_ms, total_ms)
                     _frame_count += 1
                     if _frame_count % 30 == 1:  # 30프레임마다 1회 출력 (~1초)
                         logger.debug('[TAG] latency  detect={:.1f}ms  total={:.1f}ms',

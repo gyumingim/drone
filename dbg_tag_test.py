@@ -29,9 +29,10 @@ def _put(img, text, y, color=(200, 200, 200), scale=0.52):
                 cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
 
-def draw_hud(frame, pose):
+def draw_hud(frame, pose, latency):
     h, w = frame.shape[:2]
     PANEL = 175
+    detect_ms, total_ms = latency
 
     # 하단 반투명 패널
     roi = frame[h - PANEL:h]
@@ -81,7 +82,7 @@ def draw_hud(frame, pose):
              f'go_to   dN={n:+.3f}m  dE={e:+.3f}m  (tag world 기준)',
              y0 + dy * 3)
         _put(frame,
-             f'tag_size={TAG_SIZE_M}m  |  D435i FOV 69.4 x 42.5 deg',
+             f'tag_size={TAG_SIZE_M}m  |  detect={detect_ms:.1f}ms  total={total_ms:.1f}ms',
              y0 + dy * 4 + 4, (120, 120, 120))
     else:
         cv2.putText(frame, 'o NOT DETECTED', (10, 28),
@@ -96,7 +97,7 @@ def draw_hud(frame, pose):
              y0 + dy * 2, (180, 180, 100))
         _put(frame, 'go_to   --- (tag 미감지)', y0 + dy * 3)
         _put(frame,
-             f'tag_size={TAG_SIZE_M}m  |  D435i FOV 69.4 x 42.5 deg',
+             f'tag_size={TAG_SIZE_M}m  |  detect={detect_ms:.1f}ms  total={total_ms:.1f}ms',
              y0 + dy * 4 + 4, (120, 120, 120))
 
     return frame
@@ -112,7 +113,7 @@ try:
         pose = reader.get_pose()
 
         if frame is not None:
-            draw_hud(frame, pose)
+            draw_hud(frame, pose, reader.get_latency())
             cv2.imshow(WIN, frame)
 
         if pose:

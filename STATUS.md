@@ -31,6 +31,7 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | EK3_SRC1_YAW | 6 | Yaw = ExternalNav |
 | ARMING_CHECK | 0 | pre-arm check 비활성화 |
 | VISO_TYPE | 1 | Visual Odometry = MAVLink |
+| VISO_YAW_M_NSE | 0.05 | yaw 측정 노이즈(rad). 기본 0.2(≈11.5°) → 0.05로 낮춰야 ArduPilot 내부 하한(5°=0.087rad)까지 활용 가능 |
 
 ---
 
@@ -66,6 +67,10 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
   - lib_common.py에서 alt=100000 → alt=0으로 임시 변경 후 비행
   - LOCAL_POSITION_NED.z 값이 튀는지 dbg_monitor.py로 확인
   - 재현되면 원인 확정, 안 되면 환경 의존적일 수 있음 (EEPROM 홈 고도 유무 등)
+- [ ] EK3_SRC1_POSZ=ExternalNav 고도 호버링 테스트
+  - 현재 POSZ=Baro(1) → tag의 tz(카메라↔태그 거리)를 고도로 쓰면 실내 baro보다 정확할 수 있음
+  - POSZ=6(ExternalNav)으로 변경 후 flight_tag.py 호버링이 안정적인지 확인
+  - 불안정하면 Baro로 복귀 (baro가 실내에서도 상대 고도 기준으로는 충분히 안정적)
 
 ---
 

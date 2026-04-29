@@ -62,10 +62,11 @@ _COV_UWB = [0.0] * 21
 _COV_UWB[0] = _COV_UWB[6] = _COV_UWB[11] = 0.25
 
 # TAG: ±4.5cm 오차 → variance = 0.045² ≈ 0.002
-# z(고도)는 EK3_SRC1_POSZ=1(Baro)이므로 EKF가 VPE z값 자체를 무시 → cov 값 무관
+# 실제 EKF에 들어가는 posErr = sqrt(0.002+0.002+0.002) = 0.0775m
+# → VISO_POS_M_NSE 하한(기본 0.1m)에 clamp → EKF posErr = 0.1m
+# z(고도)는 EK3_SRC1_POSZ=1(Baro)이 이미 처리 → cov[11] 값은 posErr 합산에만 영향
 _COV_TAG = [0.0] * 21
-_COV_TAG[0] = _COV_TAG[6] = 0.002
-_COV_TAG[11] = 0.002  # POSZ=Baro라 실제론 무시됨
+_COV_TAG[0] = _COV_TAG[6] = _COV_TAG[11] = 0.002
 
 
 def _vision_loop(c, uwb, tag, cache, lock, stop):
@@ -144,8 +145,10 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             elif last_vpe:
                 # ── Tag+UWB 둘 다 없음: stale VPE 전송 ────────────────────
                 # VPE를 완전히 끊으면 EKF timeout(~5초) 발생 → position lost failsafe
-                # 마지막 알려진 위치를 cov=9999(신뢰도 없음)로 전송해 timeout만 방지
-                # EKF는 이 값을 사실상 무시하고 IMU+baro만으로 버팀
+                # 마지막 알려진 위치를 cov=9999로 전송해 timeout만 방지.
+                # posErr = sqrt(9999×3) = 173m → 100m에 clamp →
+                # EKF Kalman gain≈0 → 위치 추정 사실상 갱신 안 됨 → IMU+baro만으로 버팀
+                # (UWB[11]=9999 버그와 달리 여기는 XY도 무시되는 게 의도임)
                 _cov_stale = [0.0] * 21
                 _cov_stale[0] = _cov_stale[6] = _cov_stale[11] = 9999.0
                 c.mav.vision_position_estimate_send(
