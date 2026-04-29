@@ -60,6 +60,10 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
   - [ ] `flight.py` — 이착륙 + 위치 고정 테스트
   - [ ] `mission.py` — 북 0.5m 웨이포인트 테스트
   - [ ] `flight_tag.py` — AprilTag 수렴 테스트
+- [ ] SET_GPS_GLOBAL_ORIGIN alt=0 버그 재현 테스트
+  - lib_common.py에서 alt=100000 → alt=0으로 임시 변경 후 비행
+  - LOCAL_POSITION_NED.z 값이 튀는지 dbg_monitor.py로 확인
+  - 재현되면 원인 확정, 안 되면 환경 의존적일 수 있음 (EEPROM 홈 고도 유무 등)
 
 ---
 

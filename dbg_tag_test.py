@@ -102,6 +102,10 @@ def draw_hud(frame, pose):
     return frame
 
 
+WIN = 'AprilTag Test — flight_tag preview'
+cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(WIN, 640, 480)
+
 try:
     while True:
         frame = reader.get_frame()
@@ -109,7 +113,7 @@ try:
 
         if frame is not None:
             draw_hud(frame, pose)
-            cv2.imshow('AprilTag Test — flight_tag preview', frame)
+            cv2.imshow(WIN, frame)
 
         if pose:
             n, e, d, yaw = pose
