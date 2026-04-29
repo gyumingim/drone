@@ -13,7 +13,7 @@ flight.py — UWB 기반 제자리 이착륙 (tag 미사용)
 import time
 from loguru import logger
 from lib_uwb_reader import UWBReader
-from lib_common import connect, do_takeoff, do_land, HOVER_S
+from lib_common import connect, do_takeoff, do_land, go_to, HOVER_S, TAKEOFF_M
 
 
 def main():
@@ -45,7 +45,11 @@ def main():
         return
 
     # ── 호버 ─────────────────────────────────────────────────────────────────
-    logger.info('[HOVR] 호버 {}s', HOVER_S)
+    # 2Hz로 go_to(0,0) 전송 — PosVelAccel 서브모드 활성화
+    # hold_position()은 VelAccel(속도=0)만 유지해 바람에 밀려도 복귀 안 함.
+    # 명시적 위치 목표를 주기적으로 전송해야 EKF 오차를 보정하며 원위치 복귀.
+    # 참조: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
+    logger.info('[HOVR] 호버 {}s (이륙 지점 위치 고정)', HOVER_S)
     deadline = time.time() + HOVER_S
     while time.time() < deadline:
         # UWB 신호 유실 감지 → 위치 추정 불가 → 즉시 착륙
@@ -53,6 +57,7 @@ def main():
         if uwb.get_xy() is None:
             logger.warning('[SAFE] UWB 끊김 — 착륙')
             break
+        go_to(c, 0, 0, -TAKEOFF_M)  # 이륙 지점(UWB origin) 고정, 2Hz
         time.sleep(0.5)
 
     # ── 착륙 ─────────────────────────────────────────────────────────────────
