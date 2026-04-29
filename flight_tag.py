@@ -91,6 +91,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         if pose:
             # ── Tag 감지: tag origin 기준 VPE ──────────────────────────────
             n, e, d, tag_yaw = pose  # tag_yaw: 태그 정북 정렬 가정 → NED yaw로 사용
+            drone_yaw = tag_yaw      # gyro 적분값을 tag yaw로 동기화 → TAG→UWB 전환 시 연속성 유지
 
             # 소스 전환 감지: UWB→TAG 전환 시 좌표계가 바뀌므로 reset_counter 증가
             # reset_counter가 바뀌면 EKF가 이전 위치 추정을 버리고 새 값을 즉시 수용
