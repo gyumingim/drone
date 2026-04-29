@@ -158,6 +158,21 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     _cov_stale, reset_cnt)
                 logger.debug('[VPE] 소스 없음 — 마지막 위치 유지 (stale)')
 
+        # ── DISTANCE_SENSOR 전송 (EK3_SRC1_POSZ=3 Rangefinder 고도 소스) ──
+        # MAV_SENSOR_ROTATION_PITCH_270(25) = 하향 — ArduPilot이 RNGFND1로 인식
+        depth_alt = tag.get_depth_alt()
+        if depth_alt:
+            c.mav.distance_sensor_send(
+                0,                      # timestamp (ArduPilot이 무시)
+                10,                     # min_distance cm
+                1000,                   # max_distance cm (D435i 최대 10m)
+                int(depth_alt * 100),   # current_distance cm
+                0,                      # type (무시)
+                0,                      # id (무시)
+                25,                     # MAV_SENSOR_ROTATION_PITCH_270 (하향)
+                0,                      # covariance (무시)
+            )
+
         time.sleep(0.05)   # 20Hz (50ms)
 
 

@@ -33,6 +33,10 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | VISO_TYPE | 1 | Visual Odometry = MAVLink |
 | VISO_YAW_M_NSE | 0.05 | yaw 측정 노이즈(rad). 기본 0.2(≈11.5°) → 0.05로 낮춰야 ArduPilot 내부 하한(5°=0.087rad)까지 활용 가능 |
 | VISO_DELAY_MS | 82 | VPE 전송 지연(ms). 카메라 노출→yaw 완료 실측값 82ms. 기본 25ms로 두면 EKF가 잘못된 IMU 시각에 융합함 |
+| EK3_SRC1_POSZ | 3 | Z = Rangefinder (D435i depth → DISTANCE_SENSOR) |
+| RNGFND1_TYPE | 10 | MAVLink DISTANCE_SENSOR 수신 |
+| RNGFND1_MAX_CM | 1000 | D435i 최대 거리 10m |
+| RNGFND1_MIN_CM | 10 | 최소 감지 거리 10cm |
 
 ---
 
@@ -50,6 +54,7 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] HARNESS.md 규칙 추가 (깃허브 코드 직접 확인, STATUS.md 수시 업데이트)
 - [x] tag yaw → VPE에 직접 사용 (gyro 적분 대신), tag 감지 중 drone_yaw 동기화
 - [x] `_COV_UWB[11]` 버그 수정 — ArduPilot 소스 분석으로 발견 (아래 참고)
+- [x] D435i depth 고도 소스 추가 — `lib_tag_reader.py` depth 스트림(424×240) + `get_depth_alt()` / `flight_tag.py` DISTANCE_SENSOR 20Hz 전송
 
 ## 하고 있는 일
 

@@ -67,6 +67,7 @@ class TagReader:
         self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
         self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
         self._latency = (0.0, 0.0, 0.0) # (detect_ms, total_ms, full_ms) — 최근 프레임 측정값
+        self._depth_alt = None           # 하향 depth 센서 기반 고도 (m), 유효하지 않으면 None
         self._detector = Detector(families=TAG_FAMILY, nthreads=2, quad_decimate=2.0)
 
     def start(self):
@@ -82,6 +83,11 @@ class TagReader:
         """최신 오버레이 프레임 복사본 반환. 프레임 없으면 None."""
         with self._lock:
             return self._frame.copy() if self._frame is not None else None
+
+    def get_depth_alt(self):
+        """하향 depth 센서로 측정한 고도 (m). 유효하지 않으면 None."""
+        with self._lock:
+            return self._depth_alt
 
     def get_latency(self):
         """(detect_ms, total_ms, full_ms) 반환.
@@ -99,6 +105,9 @@ class TagReader:
                 # 컬러 스트림만 활성화 (depth 스트림 불필요 — 고도는 pose_t.z로 계산)
                 cfg.enable_stream(
                     rs.stream.color, 640, 480, rs.format.bgr8, 30)
+                # depth: 424×240 최소 해상도 — 중앙 픽셀만 쓰므로 고해상도 불필요
+                cfg.enable_stream(
+                    rs.stream.depth, 424, 240, rs.format.z16, 30)
                 profile = pipeline.start(cfg)
 
                 # 카메라 내부 파라미터 (intrinsics) 추출
@@ -133,6 +142,20 @@ class TagReader:
                     t_frame = time.time()
 
                     img = np.asanyarray(color.get_data())  # BGR, (480, 640, 3)
+
+                    # ── depth 고도 계산 (424×240, center=212,120) ────────────
+                    # 중앙 5×5 패치 메디안 → 단일 픽셀 노이즈 제거
+                    # get_distance()는 depth_scale 적용된 미터값 반환
+                    depth = frames.get_depth_frame()
+                    if depth:
+                        ds = [depth.get_distance(212 + dx, 120 + dy)
+                              for dx in range(-2, 3) for dy in range(-2, 3)]
+                        ds = [d for d in ds if d > 0]
+                        _depth_alt = float(np.median(ds)) if ds else None
+                    else:
+                        _depth_alt = None
+                    with self._lock:
+                        self._depth_alt = _depth_alt
 
                     # ── 180° 이미지 선회전 (pre-rotation) ───────────────────────
                     # 카메라가 물리적으로 180° 돌아 있으므로 raw 이미지도 뒤집혀 있음.
