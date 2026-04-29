@@ -72,6 +72,14 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
   - 현재 POSZ=Baro(1) → tag의 tz(카메라↔태그 거리)를 고도로 쓰면 실내 baro보다 정확할 수 있음
   - POSZ=6(ExternalNav)으로 변경 후 flight_tag.py 호버링이 안정적인지 확인
   - 불안정하면 Baro로 복귀 (baro가 실내에서도 상대 고도 기준으로는 충분히 안정적)
+- [ ] SET_GPS_GLOBAL_ORIGIN alt 값 조정 + POSZ=ExternalNav 40m 버그 재현 테스트
+  - 원인: alt=100000(100m 더미) → EKF origin이 100m MSL → VPE z=0이 "100m MSL" 로 해석
+          → 실제 지면과 차이(예: 60m MSL)만큼 고도 오차 발생 (→ 40m 표시)
+  - 테스트: lib_common.py에서 alt=100000 → alt=1000(1m)으로 변경
+  - 동시에 flight_tag.py TAG 모드 VPE z를 -HOVER_ALT(고정) 대신 -tag_down(실제 거리) 으로 변경
+  - 확인: POSZ=ExternalNav에서 고도가 정상(~1m)으로 표시되는지 검증
+  - 주의: alt=0은 절대 금지 (+131m EKF Origin Alt=0 Trigger Bug 재발)
+  - 불안정하면 Baro로 복귀 (baro가 실내에서도 상대 고도 기준으로는 충분히 안정적)
 
 ---
 
@@ -79,7 +87,7 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 
 | 문제 | 원인 | 해결 |
 |---|---|---|
-| EKF z +131m 급상승 | `SET_GPS_GLOBAL_ORIGIN(alt=0)` → baro 1Hz 리셋 ArduPilot 버그 | `alt=100000`(100m 더미) |
+| **[EKF Origin Alt=0 Trigger Bug]** EKF z +131m 급상승 | `SET_GPS_GLOBAL_ORIGIN(alt=0)` → ArduPilot이 "해수면=0m"으로 해석 → baro 측정값과 차이를 1Hz마다 재보정 → LOCAL_POSITION_NED.z 급등 | `alt=100000`(100m 더미)로 보정 로직 우회. 정확한 값 불필요, 단 0은 금지 |
 | 이륙 중 위치 유실 | `_vision_loop` takeoff 후 시작 | takeoff 전으로 이동 |
 | 호버 중 drift | `hold_position()` VelAccel만 유지, 바람에 복귀 안 함 | `go_to()` 2Hz 반복 전송 |
 | 180° 카메라 NED 오류 | raw 이미지 뒤집힘 | `cv2.ROTATE_180` 선회전 |

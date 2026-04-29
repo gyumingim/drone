@@ -67,7 +67,7 @@ class TagReader:
         self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
         self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
         self._latency = (0.0, 0.0, 0.0) # (detect_ms, total_ms, full_ms) — 최근 프레임 측정값
-        self._detector = Detector(families=TAG_FAMILY, nthreads=4, quad_decimate=2.0)
+        self._detector = Detector(families=TAG_FAMILY, nthreads=2, quad_decimate=2.0)
 
     def start(self):
         """백그라운드 캡처 스레드 시작. daemon=True이므로 메인 종료 시 자동 종료."""
