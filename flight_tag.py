@@ -55,10 +55,11 @@ HOVER_ALT = TAKEOFF_M
 # variance = (예상오차)² 로 설정
 
 # UWB: ±50cm 오차 → variance = 0.5² = 0.25
-# z는 무시 (고도는 baro가 담당) → 9999로 설정해 EKF가 z 값을 신뢰하지 않게 함
+# z는 EK3_SRC1_POSZ=1(Baro)이 이미 무시하므로 cov[11]을 9999로 올릴 필요 없음.
+# ArduPilot GCS_Common.cpp: posErr = sqrt(cov[0]+cov[6]+cov[11]) 합산 계산 →
+# cov[11]=9999이면 posErr≈100m이 되어 EKF가 XY까지 사실상 무시함 (버그).
 _COV_UWB = [0.0] * 21
-_COV_UWB[0] = _COV_UWB[6] = 0.25
-_COV_UWB[11] = 9999.0
+_COV_UWB[0] = _COV_UWB[6] = _COV_UWB[11] = 0.25
 
 # TAG: ±4.5cm 오차 → variance = 0.045² ≈ 0.002
 # z(고도)는 EK3_SRC1_POSZ=1(Baro)이므로 EKF가 VPE z값 자체를 무시 → cov 값 무관

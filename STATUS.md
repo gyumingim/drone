@@ -46,6 +46,8 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] `_hover()` 헬퍼 추가 (go_to 반복 + UWB 끊김 감시)
 - [x] 단일 리더 스레드 아키텍처 (recv_match 충돌 해결)
 - [x] HARNESS.md 규칙 추가 (깃허브 코드 직접 확인, STATUS.md 수시 업데이트)
+- [x] tag yaw → VPE에 직접 사용 (gyro 적분 대신), tag 감지 중 drone_yaw 동기화
+- [x] `_COV_UWB[11]` 버그 수정 — ArduPilot 소스 분석으로 발견 (아래 참고)
 
 ## 하고 있는 일
 
@@ -78,3 +80,4 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | roll/pitch NaN | 멀티스레드 recv_match 충돌 | 단일 리더 스레드 |
 | yaw=0 고정 | 동일한 멀티스레드 충돌 | 단일 리더 스레드 |
 | ARM FAILED | pre-arm check | ARMING_CHECK=0 |
+| UWB fallback 시 XY 위치 무시 | `_COV_UWB[11]=9999` → GCS_Common.cpp가 `posErr=sqrt(cov[0]+cov[6]+cov[11])`로 합산 → posErr≈100m → EKF가 UWB XY까지 무시 | `_COV_UWB[11]=0.25` (EK3_SRC1_POSZ=Baro가 z를 이미 거부하므로 9999 불필요) |
