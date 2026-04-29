@@ -61,10 +61,10 @@ _COV_UWB[0] = _COV_UWB[6] = 0.25
 _COV_UWB[11] = 9999.0
 
 # TAG: ±4.5cm 오차 → variance = 0.045² ≈ 0.002
-# tag는 z(고도)도 신뢰할 수 있으므로 z variance도 낮게 설정
+# z(고도)는 EK3_SRC1_POSZ=1(Baro)이므로 EKF가 VPE z값 자체를 무시 → cov 값 무관
 _COV_TAG = [0.0] * 21
 _COV_TAG[0] = _COV_TAG[6] = 0.002
-_COV_TAG[11] = 0.002
+_COV_TAG[11] = 0.002  # POSZ=Baro라 실제론 무시됨
 
 
 def _vision_loop(c, uwb, tag, cache, lock, stop):
@@ -81,8 +81,9 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         pose = tag.get_pose()  # (north, east, down, yaw) or None
         now = time.time()
 
-        # 드론 현재 heading (나침반 없으면 gyro 적분값)
-        # VPE yaw 필드에 넣어 EKF yaw 추정에 활용
+        # FC에서 현재 yaw를 읽어 VPE yaw 필드로 돌려줌
+        # EK3_SRC1_YAW=6(ExternalNav)이므로 EKF가 실제로 사용함
+        # 독립 yaw 센서가 없으므로 FC 자신의 gyro 적분값을 확인하는 역할
         with lock:
             att = cache['attitude']
         drone_yaw = att.yaw if att else 0.0
@@ -102,8 +103,8 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             # go_to(0,0)으로 태그 origin(=태그 바로 위)을 향해 이동
             c.mav.vision_position_estimate_send(
                 int(now * 1e6),          # 타임스탬프 (μs)
-                -n, -e, -HOVER_ALT,      # 드론 위치 (태그 기준, NED)
-                0.0, 0.0, drone_yaw,     # roll=0, pitch=0, yaw=드론heading
+                -n, -e, -HOVER_ALT,      # x,y: 태그 기준 드론 위치 / z: EK3_SRC1_POSZ=Baro라 무시됨
+                0.0, 0.0, drone_yaw,     # roll=0, pitch=0 / yaw: EK3_SRC1_YAW=6이라 EKF가 사용
                 _COV_TAG, reset_cnt)
 
             last_vpe = (-n, -e, -HOVER_ALT)
