@@ -90,7 +90,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
 
         if pose:
             # ── Tag 감지: tag origin 기준 VPE ──────────────────────────────
-            n, e, d, _ = pose   # tag yaw 미사용 (드론 heading과 독립)
+            n, e, d, tag_yaw = pose  # tag_yaw: 태그 정북 정렬 가정 → NED yaw로 사용
 
             # 소스 전환 감지: UWB→TAG 전환 시 좌표계가 바뀌므로 reset_counter 증가
             # reset_counter가 바뀌면 EKF가 이전 위치 추정을 버리고 새 값을 즉시 수용
@@ -101,10 +101,11 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             # 태그=(0,0) origin 좌표계에서 드론 위치 = (-n, -e)
             # 예: 태그가 드론 북쪽 0.3m → n=0.3 → 드론은 태그 기준 south(-0.3)
             # go_to(0,0)으로 태그 origin(=태그 바로 위)을 향해 이동
+            # yaw: tag 기반 (드리프트 없음) / FC gyro yaw는 tag 미감지 시에만 사용
             c.mav.vision_position_estimate_send(
                 int(now * 1e6),          # 타임스탬프 (μs)
                 -n, -e, -HOVER_ALT,      # x,y: 태그 기준 드론 위치 / z: EK3_SRC1_POSZ=Baro라 무시됨
-                0.0, 0.0, drone_yaw,     # roll=0, pitch=0 / yaw: EK3_SRC1_YAW=6이라 EKF가 사용
+                0.0, 0.0, tag_yaw,       # roll=0, pitch=0 / yaw: tag 기반 NED yaw (EKF가 사용)
                 _COV_TAG, reset_cnt)
 
             last_vpe = (-n, -e, -HOVER_ALT)

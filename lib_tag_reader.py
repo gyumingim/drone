@@ -115,7 +115,9 @@ class TagReader:
                     '  cx={:.1f}→{:.1f}  cy={:.1f}→{:.1f}',
                     fx, fy, cx, cx_rot, cy, cy_rot)
 
+                _frame_count = 0
                 while True:
+                    t_frame = time.time()
                     frames = pipeline.wait_for_frames(timeout_ms=2000)
                     color = frames.get_color_frame()
                     if not color:
@@ -137,12 +139,19 @@ class TagReader:
 
                     # AprilTag 감지 + pose 추정
                     # cx_rot, cy_rot: 회전된 이미지 기준의 주점 사용
+                    t_detect = time.time()
                     dets = self._detector.detect(
                         gray,
                         estimate_tag_pose=True,
                         camera_params=[fx, fy, cx_rot, cy_rot],
                         tag_size=self._tag_size,
                     )
+                    detect_ms = (time.time() - t_detect) * 1000
+                    total_ms = (time.time() - t_frame) * 1000
+                    _frame_count += 1
+                    if _frame_count % 30 == 1:  # 30프레임마다 1회 출력 (~1초)
+                        logger.debug('[TAG] latency  detect={:.1f}ms  total={:.1f}ms',
+                                     detect_ms, total_ms)
 
                     # 특정 ID만 추적할 경우 필터링 (tag_id=None이면 전체 허용)
                     if self._tag_id is not None:
@@ -178,9 +187,8 @@ class TagReader:
                     east = tx
                     down = tz  # 드론 고도 ≈ tz (지면 태그 기준, 양수)
 
-                    # yaw: 이미지 회전으로 장착 보정이 완료됐으므로 추가 오프셋 불필요
-                    # atan2(R[1,0], R[0,0]): 카메라 프레임 기준 태그의 Z축 회전각
-                    # 참고: flight_tag.py에서 이 yaw는 미사용 (드론 heading은 att.yaw 사용)
+                    # yaw: 드론의 NED yaw (태그가 정북 정렬돼 있으면 NED 기준과 일치)
+                    # atan2(R[1,0], R[0,0]): 이미지 회전 후 태그 Z축 회전각 = 드론 heading
                     yaw = math.atan2(R[1, 0], R[0, 0])
 
                     # ── 시각화 오버레이 (tag_test.py 전용) ──────────────────────
