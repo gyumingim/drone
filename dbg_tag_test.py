@@ -1,4 +1,4 @@
-"""tag_test.py — AprilTag 감지 테스트 + flight_tag 투입값 시각화
+"""dbg_tag_test.py — AprilTag 감지 테스트 + flight_tag 투입값 시각화
 
 화면 구성:
   - 태그 코너/중심 (tag_reader 기본 오버레이)
@@ -9,17 +9,18 @@ import math
 import time
 import cv2
 import numpy as np
+from loguru import logger
 from lib_tag_reader import TagReader, TAG_SIZE_M
 
 DEADBAND_M = 0.08  # flight_tag.py 와 동일
 COV_TAG = 0.002
 COV_UWB = 0.05
 
-print(f'[TEST] tag_size={TAG_SIZE_M}m  |  q 키로 종료')
+logger.info('[TEST] tag_size={}m  |  q 키로 종료', TAG_SIZE_M)
 reader = TagReader()
 reader.start()
 
-print('[TEST] 카메라 초기화 대기...')
+logger.info('[TEST] 카메라 초기화 대기...')
 time.sleep(2)
 
 
@@ -51,7 +52,8 @@ def draw_hud(frame, pose):
         ax = max(20, min(w - 20, ax))
         ay = max(20, min(h - PANEL - 20, ay))
         color_arrow = (0, 255, 255) if in_db else (0, 165, 255)
-        cv2.arrowedLine(frame, (cx, cy_ref), (ax, ay), color_arrow, 3, tipLength=0.25)
+        cv2.arrowedLine(frame, (cx, cy_ref), (ax, ay),
+                        color_arrow, 3, tipLength=0.25)
         cv2.circle(frame, (cx, cy_ref), 6, (255, 255, 255), -1)
         cv2.putText(frame, 'drone', (cx + 8, cy_ref - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1)
@@ -83,7 +85,8 @@ def draw_hud(frame, pose):
              y0 + dy * 4 + 4, (120, 120, 120))
     else:
         cv2.putText(frame, 'o NOT DETECTED', (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.78, (60, 60, 230), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.78, (60, 60, 230), 2,
+                    cv2.LINE_AA)
 
         y0, dy = h - PANEL + 22, 27
         _put(frame, 'Pose    N=---  E=---  D=---  yaw=---', y0, (80, 80, 180))
@@ -102,7 +105,7 @@ def draw_hud(frame, pose):
 try:
     while True:
         frame = reader.get_frame()
-        pose  = reader.get_pose()
+        pose = reader.get_pose()
 
         if frame is not None:
             draw_hud(frame, pose)
@@ -110,11 +113,11 @@ try:
 
         if pose:
             n, e, d, yaw = pose
-            print(f'[TAG] N={n:+.3f}m  E={e:+.3f}m  D={d:.3f}m  '
-                  f'yaw={math.degrees(yaw):+.1f}deg  '
-                  f'dist2d={math.hypot(n, e):.3f}m')
+            logger.info('[TAG] N={:+.3f}m  E={:+.3f}m  D={:.3f}m'
+                        '  yaw={:+.1f}deg  dist2d={:.3f}m',
+                        n, e, d, math.degrees(yaw), math.hypot(n, e))
         else:
-            print('[TAG] 미감지')
+            logger.debug('[TAG] 미감지')
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -125,4 +128,4 @@ except KeyboardInterrupt:
     pass
 finally:
     cv2.destroyAllWindows()
-    print('[TEST] 종료')
+    logger.info('[TEST] 종료')

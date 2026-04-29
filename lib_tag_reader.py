@@ -44,9 +44,10 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 from pupil_apriltags import Detector
+from loguru import logger
 
 TAG_FAMILY = 'tag36h11'
-TAG_SIZE_M = 0.16    # 태그 한 변 실제 크기 (m) — 실물 측정값으로 교정 필수
+TAG_SIZE_M = 0.16  # 태그 한 변 실제 크기 (m) — 실물 측정값으로 교정 필수
 
 
 class TagReader:
@@ -61,10 +62,10 @@ class TagReader:
 
     def __init__(self, tag_size=TAG_SIZE_M, tag_id=None):
         self._tag_size = tag_size
-        self._tag_id   = tag_id   # None이면 ID 무관하게 가장 신뢰도 높은 태그 사용
-        self._lock     = threading.Lock()
-        self._pose     = None     # 태그 미감지 시 None — flight_tag가 UWB로 전환
-        self._frame    = None     # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
+        self._tag_id = tag_id      # None이면 ID 무관하게 가장 신뢰도 높은 태그 사용
+        self._lock = threading.Lock()
+        self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
+        self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
         self._detector = Detector(families=TAG_FAMILY)
 
     def start(self):
@@ -89,7 +90,8 @@ class TagReader:
             try:
                 cfg = rs.config()
                 # 컬러 스트림만 활성화 (depth 스트림 불필요 — 고도는 pose_t.z로 계산)
-                cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+                cfg.enable_stream(
+                    rs.stream.color, 640, 480, rs.format.bgr8, 30)
                 profile = pipeline.start(cfg)
 
                 # 카메라 내부 파라미터 (intrinsics) 추출
@@ -108,12 +110,14 @@ class TagReader:
                 # (RealSense cx≈320, cy≈240이라 차이는 ~1px지만 명시적으로 보정)
                 cx_rot = (w_px - 1) - cx
                 cy_rot = (h_px - 1) - cy
-                print(f'[TAG] 카메라 연결  fx={fx:.1f} fy={fy:.1f}  '
-                      f'cx={cx:.1f}→{cx_rot:.1f}  cy={cy:.1f}→{cy_rot:.1f}')
+                logger.info(
+                    '[TAG] 카메라 연결  fx={:.1f} fy={:.1f}'
+                    '  cx={:.1f}→{:.1f}  cy={:.1f}→{:.1f}',
+                    fx, fy, cx, cx_rot, cy, cy_rot)
 
                 while True:
                     frames = pipeline.wait_for_frames(timeout_ms=2000)
-                    color  = frames.get_color_frame()
+                    color = frames.get_color_frame()
                     if not color:
                         continue
 
@@ -124,11 +128,11 @@ class TagReader:
                     # detector 실행 전에 보정하면 pose_t가 표준 0° 장착과 동일하게 나옴.
                     # → 이후 NED 변환에서 별도 축 변환 수식이 필요 없어짐.
                     # 장착 각도 변경 시 이 상수만 바꾸면 됨:
-                    #   0°   → 회전 없음 (이 줄 제거)
-                    #   90° CW  → cv2.ROTATE_90_CLOCKWISE
-                    #   90° CCW → cv2.ROTATE_90_COUNTERCLOCKWISE
-                    #   180°    → cv2.ROTATE_180  ← 현재
-                    img  = cv2.rotate(img,  cv2.ROTATE_180)
+                    #   0°       → 회전 없음 (이 줄 제거)
+                    #   90° CW   → cv2.ROTATE_90_CLOCKWISE
+                    #   90° CCW  → cv2.ROTATE_90_COUNTERCLOCKWISE
+                    #   180°     → cv2.ROTATE_180  ← 현재
+                    img = cv2.rotate(img, cv2.ROTATE_180)
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
                     # AprilTag 감지 + pose 추정
@@ -147,7 +151,7 @@ class TagReader:
                     if not dets:
                         # 태그 미감지: pose None 유지 → flight_tag가 UWB VPE로 전환
                         with self._lock:
-                            self._pose  = None
+                            self._pose = None
                             self._frame = img
                         continue
 
@@ -157,7 +161,7 @@ class TagReader:
                     # pose_t: 카메라 원점 기준 태그까지의 변위 (미터, 카메라 프레임)
                     # pose_R: 카메라 프레임 기준 태그의 회전행렬 (3×3)
                     tx, ty, tz = det.pose_t.flatten()
-                    R           = det.pose_R
+                    R = det.pose_R
 
                     # ── 카메라 프레임 → NED 프레임 변환 ────────────────────────
                     # 이미지를 180° 회전했으므로 detector는 표준 0° 장착으로 인식.
@@ -171,8 +175,8 @@ class TagReader:
                     #   태그는 드론 기준 South → 회전 이미지 하단에 위치 → ty > 0
                     #   north = -ty = -0.3 < 0  (태그가 드론 남쪽) → 맞음 ✓
                     north = -ty
-                    east  =  tx
-                    down  =  tz   # 드론 고도 ≈ tz (지면 태그 기준, 양수)
+                    east = tx
+                    down = tz  # 드론 고도 ≈ tz (지면 태그 기준, 양수)
 
                     # yaw: 이미지 회전으로 장착 보정이 완료됐으므로 추가 오프셋 불필요
                     # atan2(R[1,0], R[0,0]): 카메라 프레임 기준 태그의 Z축 회전각
@@ -194,13 +198,13 @@ class TagReader:
 
                     # 다른 스레드가 읽는 도중 갱신되지 않도록 lock으로 원자적 업데이트
                     with self._lock:
-                        self._pose  = (north, east, down, yaw)
+                        self._pose = (north, east, down, yaw)
                         self._frame = img
 
             except Exception as e:
-                print(f'[TAG] 에러: {e} — 3초 후 재시도')
+                logger.error('[TAG] 에러: {} — 3초 후 재시도', e)
                 with self._lock:
-                    self._pose = None   # 에러 시 pose 무효화 → UWB 폴백 유도
+                    self._pose = None  # 에러 시 pose 무효화 → UWB 폴백 유도
                 time.sleep(3)
             finally:
                 # pipeline.start() 성공 여부와 무관하게 항상 정리

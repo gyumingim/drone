@@ -15,12 +15,13 @@ mission.py — UWB 기반 웨이포인트 비행 (tag 미사용)
 용도: AprilTag 없이 UWB만으로 waypoint 비행 기능 검증
 """
 import time
+from loguru import logger
 from pymavlink import mavutil
 from lib_uwb_reader import UWBReader
 from lib_common import (
     connect, do_takeoff, do_land,
     go_to, wait_pos, cmd,
-    ts, TAKEOFF_M,
+    TAKEOFF_M,
 )
 
 SPEED_MS  = 0.3         # 순항 속도 (m/s) — 실내 기준 보수적 값
@@ -42,10 +43,10 @@ def main():
     # origin 확정 전에는 get_xy()가 None → EKF에 VPE 전송 불가 → 비행 불가
     uwb = UWBReader()
     uwb.start()
-    print(f'[UWB] {ts()} origin 대기...')
+    logger.info('[UWB] origin 대기...')
     while uwb.get_xy() is None:
         time.sleep(0.2)
-    print(f'[UWB] {ts()} origin 확정: {uwb.get_xy()}')
+    logger.info('[UWB] origin 확정: {}', uwb.get_xy())
 
     # ── FC 연결 및 준비 ───────────────────────────────────────────────────────
     # connect() 내부: _vision_loop(UWB VPE 20Hz) 자동 시작
@@ -69,11 +70,11 @@ def main():
     #   param3=-1: throttle 변경 없음
     # 참조: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
     cmd(c, mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED, 1, SPEED_MS, -1, 0, 0, 0, 0)
-    print(f'[NAV] {ts()} 순항 속도 {SPEED_MS}m/s 설정')
+    logger.info('[NAV] 순항 속도 {}m/s 설정', SPEED_MS)
 
     # ── 웨이포인트 순차 이동 ─────────────────────────────────────────────────
     for x, y, label in WAYPOINTS:
-        print(f'[NAV] {ts()} → {label}  ({x:.1f}N, {y:.1f}E)')
+        logger.info('[NAV] → {}  ({:.1f}N, {:.1f}E)', label, x, y)
 
         # SET_POSITION_TARGET_LOCAL_NED로 목표 위치 전송
         # EKF가 UWB VPE로 현재 위치를 알고 있어야 go_to가 올바르게 동작
@@ -81,11 +82,11 @@ def main():
 
         # LOCAL_POSITION_NED 기반 도달 판정 (허용오차 0.3m, 타임아웃 20s)
         if not wait_pos(c, cache, lock, x, y):
-            print(f'[NAV] {ts()} {label} 도달 실패 — 착륙')
+            logger.warning('[NAV] {} 도달 실패 — 착륙', label)
             do_land(c, stop, cache)
             return
 
-        print(f'[NAV] {ts()} {label} 도달!')
+        logger.info('[NAV] {} 도달!', label)
         time.sleep(1)  # 각 웨이포인트에서 1초 정지
 
     # ── 착륙 ─────────────────────────────────────────────────────────────────

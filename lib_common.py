@@ -22,11 +22,28 @@ import os
 # import 전에 설정해야 적용됨
 os.environ['MAVLINK20'] = '1'
 
+import sys
 import math
 import time
 import threading
 from queue import Queue, Empty
+
+from loguru import logger
 from pymavlink import mavutil
+
+# ── loguru 설정 ───────────────────────────────────────────────────────────────
+# 기본 핸들러 제거 후 재설정
+logger.remove()
+# 터미널: 시각 + 레벨 + 메시지 (간결하게)
+logger.add(sys.stderr, format="{time:HH:mm:ss.SSS} | {level:<7} | {message}")
+# 파일: 날짜별 로그, 10MB 초과 시 rotation, 7일 보관
+logger.add(
+    "logs/drone_{time:YYYY-MM-DD}.log",
+    rotation="10 MB",
+    retention="7 days",
+    encoding="utf-8",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<7} | {message}",
+)
 
 # ── 하드웨어 설정 ─────────────────────────────────────────────────────────────
 FC_PORT   = '/dev/ttyACM0'   # FC USB-UART 포트 (Pixhawk/ArduPilot)
@@ -38,43 +55,35 @@ HOVER_S   = 5.0              # flight.py 호버 시간 (s)
 # EKF_STATUS_REPORT.flags에서 아래 비트가 모두 set돼야 비행 가능
 # 0x001=att(자세), 0x002=vel_h(수평속도), 0x008=pos_rel(상대위치), 0x010=pos_abs(절대위치)
 _EKF_NEED = 0x001 | 0x002 | 0x008 | 0x010
-_ARMED    = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED  # HEARTBEAT base_mode ARM 비트
+_ARMED    = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
-# ── MAVLink 결과 코드 → 문자열 ────────────────────────────────────────────────
 _MAV_RESULT = {
     0: 'ACCEPTED', 1: 'TEMP_REJECTED', 2: 'DENIED',
     3: 'UNSUPPORTED', 4: 'FAILED', 5: 'IN_PROGRESS', 6: 'CANCELLED',
 }
 _SEV = ['EMERG', 'ALERT', 'CRIT', 'ERR', 'WARN', 'NOTICE', 'INFO', 'DEBUG']
 
-# EKF_STATUS_REPORT.flags 비트 → 이름 매핑 (로그 출력용)
 _EKF_BITS = {
-    0x001: 'att',       0x002: 'vel_h',     0x004: 'vel_v',
-    0x008: 'pos_rel',   0x010: 'pos_abs',   0x020: 'const_pos',
-    0x040: 'pred_h',    0x080: 'pred_v',    0x100: 'pred_rel',
+    0x001: 'att',        0x002: 'vel_h',      0x004: 'vel_v',
+    0x008: 'pos_rel',    0x010: 'pos_abs',    0x020: 'const_pos',
+    0x040: 'pred_h',     0x080: 'pred_v',     0x100: 'pred_rel',
     0x200: 'gps_glitch', 0x400: 'accel_err',
 }
 
 # SET_POSITION_TARGET_LOCAL_NED type_mask
 # 0x0DF8 = 0b110111111000 = 3576
-# 비트 해석 (1=무시, 0=사용):
-#   bit0~2: pos x,y,z → 0 (사용)
-#   bit3~8: vel, acc  → 1 (무시)
-#   bit9:   force     → 0 (force 모드 아님, 반드시 0)
-#   bit10~11: yaw, yaw_rate → 1 (무시)
+# bit0~2: pos x,y,z → 0 (사용)
+# bit3~8: vel, acc  → 1 (무시)
+# bit9:   force     → 0 (반드시 0, 1이면 force 모드로 오동작)
+# bit10~11: yaw, yaw_rate → 1 (무시)
 # 참조: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
-_POS_MASK = 0b0000110111111000   # 0x0DF8
+_POS_MASK = 0b0000110111111000   # 0x0DF8 / 3576
 
 
 # ── 헬퍼 함수 ─────────────────────────────────────────────────────────────────
 
-def ts():
-    """현재 시각 HH:MM:SS 문자열 (로그 prefix용)."""
-    return time.strftime('%H:%M:%S')
-
-
 def ekf_str(flags):
-    """EKF flags 정수를 사람이 읽기 쉬운 비트 이름 문자열로 변환."""
+    """EKF flags 정수를 비트 이름 문자열로 변환 (로그 출력용)."""
     return '|'.join(n for b, n in _EKF_BITS.items() if flags & b) or 'none'
 
 
@@ -90,14 +99,14 @@ def go_to(c, x_north, y_east, z_ned):
     위치만 사용(_POS_MASK), 속도/가속도/yaw는 FC 내부 제어기가 결정.
     """
     c.mav.set_position_target_local_ned_send(
-        0,                                       # time_boot_ms (0=무시)
+        0,
         c.target_system, c.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,     # EKF local NED 프레임
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         _POS_MASK,
-        x_north, y_east, z_ned,                  # 목표 위치
-        0, 0, 0,                                 # 속도 (무시됨)
-        0, 0, 0,                                 # 가속도 (무시됨)
-        0, 0)                                    # yaw, yaw_rate (무시됨)
+        x_north, y_east, z_ned,
+        0, 0, 0,
+        0, 0, 0,
+        0, 0)
 
 
 def wait_pos(c, cache, lock, x, y, tol=0.3, timeout=20):
@@ -115,8 +124,8 @@ def wait_pos(c, cache, lock, x, y, tol=0.3, timeout=20):
             time.sleep(0.05)
             continue
         dist = ((m.x - x)**2 + (m.y - y)**2) ** 0.5
-        print(f'[NAV] {ts()} pos=({m.x:.2f},{m.y:.2f}) '
-              f'target=({x:.2f},{y:.2f}) dist={dist:.2f}m')
+        logger.debug('[NAV] pos=({:.2f},{:.2f}) target=({:.2f},{:.2f}) dist={:.2f}m',
+                     m.x, m.y, x, y, dist)
         if dist < tol:
             return True
         time.sleep(0.1)
@@ -128,7 +137,6 @@ def wait_pos(c, cache, lock, x, y, tol=0.3, timeout=20):
 def _reader_loop(c, cache, lock, stop):
     """유일하게 recv_match()를 호출하는 MAVLink 수신 스레드.
 
-    수신한 메시지를 타입별로 cache에 저장.
     COMMAND_ACK는 Queue에 넣어 _wait_ack()에서 꺼내 씀.
     STATUSTEXT는 FC가 보내는 텍스트 알림 (arming 실패 이유 등) → 즉시 출력.
     """
@@ -141,20 +149,20 @@ def _reader_loop(c, cache, lock, stop):
             with lock:
                 if t == 'ATTITUDE':
                     cache['attitude'] = m
-                    cache['yaw'] = m.yaw        # yaw를 별도 키로도 저장 (빠른 접근용)
+                    cache['yaw'] = m.yaw
                 elif t == 'LOCAL_POSITION_NED':
-                    cache['local_pos'] = m      # EKF 추정 위치 (VPE 반영됨)
+                    cache['local_pos'] = m
                 elif t == 'EKF_STATUS_REPORT':
-                    cache['ekf'] = m            # EKF 준비 상태 플래그
+                    cache['ekf'] = m
                 elif t == 'HEARTBEAT':
-                    cache['heartbeat'] = m      # ARM 상태, 모드 확인용
+                    cache['heartbeat'] = m
                 elif t == 'COMMAND_ACK':
-                    cache['ack_queue'].put(m)   # cmd() 호출 후 ACK 수신용
+                    cache['ack_queue'].put(m)
                 elif t == 'STATUSTEXT':
                     sev = _SEV[m.severity] if m.severity < len(_SEV) else str(m.severity)
-                    print(f'[FC-MSG] {ts()} [{sev}] {m.text}')
+                    logger.info('[FC] [{}] {}', sev, m.text)
         except Exception as e:
-            print(f'[READER] {ts()} 오류: {e}')
+            logger.error('[READER] 오류: {}', e)
 
 
 def _vision_loop(c, uwb, cache, lock, stop):
@@ -165,10 +173,9 @@ def _vision_loop(c, uwb, cache, lock, stop):
     yaw는 cache에서 읽어 VPE yaw 필드에 넣음 (EKF yaw 추정 보조).
     20개마다 1회 로그 출력 (1Hz).
     """
-    # UWB 전용 covariance: xy ±10cm(0.01), z 무시(9999)
     cov = [0.0] * 21
-    cov[0] = cov[6] = 0.01
-    cov[11] = 9999.0
+    cov[0] = cov[6] = 0.01   # xy ±10cm
+    cov[11] = 9999.0          # z 무시
     sent = 0
     while not stop.is_set():
         with lock:
@@ -179,17 +186,13 @@ def _vision_loop(c, uwb, cache, lock, stop):
                 int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov)
             sent += 1
             if sent % 20 == 0:
-                print(f'[VIS] {ts()} xy=({xy[0]:.3f},{xy[1]:.3f}) '
-                      f'yaw={yaw:.3f}rad total={sent}')
-        time.sleep(0.05)   # 20Hz
+                logger.debug('[VIS] xy=({:.3f},{:.3f}) yaw={:.3f}rad total={}',
+                             xy[0], xy[1], yaw, sent)
+        time.sleep(0.05)
 
 
 def _hb_loop(c, stop):
-    """GCS heartbeat 1Hz 전송.
-
-    FC는 GCS heartbeat가 일정 시간 없으면 RC failsafe를 트리거할 수 있음.
-    MAV_TYPE_GCS로 보내야 FC가 GCS 연결로 인식.
-    """
+    """GCS heartbeat 1Hz 전송. FC watchdog 방지."""
     while not stop.is_set():
         c.mav.heartbeat_send(
             mavutil.mavlink.MAV_TYPE_GCS,
@@ -198,27 +201,25 @@ def _hb_loop(c, stop):
 
 
 def _rc_override_loop(c, stop):
-    """RC override 5Hz 전송 — throttle failsafe 방지.
+    """RC override 5Hz — ch3(throttle)=1000 고정으로 throttle failsafe 방지.
 
-    ch3(throttle)을 1000(최저)으로 override해 FC가 RC 신호 없음으로 인한
-    throttle failsafe를 트리거하지 않도록 함.
-    나머지 채널은 0(release) → 물리적 RC 조종기 입력이 그대로 통과.
+    나머지 채널 0(release) → 물리적 RC 조종기 입력 통과.
     """
     while not stop.is_set():
         try:
             c.mav.rc_channels_override_send(
                 c.target_system, c.target_component,
-                0, 0, 1000, 0,    # ch1~4: ch3만 1000, 나머지 0(release)
-                0, 0, 0, 0)       # ch5~8: 전부 0(release)
+                0, 0, 1000, 0,
+                0, 0, 0, 0)
         except Exception as e:
-            print(f'[RC-OVR] {ts()} 오류: {e}')
-        time.sleep(0.2)   # 5Hz
+            logger.warning('[RC-OVR] 오류: {}', e)
+        time.sleep(0.2)
 
 
 # ── 공통 비행 시퀀스 ──────────────────────────────────────────────────────────
 
 def _wait_ack(cache, timeout=3):
-    """ack_queue에서 COMMAND_ACK 메시지 꺼냄. 타임아웃 시 None 반환."""
+    """ack_queue에서 COMMAND_ACK 꺼냄. 타임아웃 시 None."""
     try:
         return cache['ack_queue'].get(timeout=timeout)
     except Empty:
@@ -237,35 +238,30 @@ def connect(uwb, start_vision=True):
         성공: (c, stop, cache, lock)
         실패(ARM 불가): (None, stop, None, None)
     """
-    print(f'[FC] {ts()} {FC_PORT}@{FC_BAUD} 연결 중...')
+    logger.info('[FC] {}@{} 연결 중...', FC_PORT, FC_BAUD)
     c = mavutil.mavlink_connection(FC_PORT, baud=FC_BAUD)
     hb0 = c.wait_heartbeat()
-    print(f'[FC] {ts()} sysid={c.target_system} '
-          f'base_mode={hb0.base_mode:#010b} custom_mode={hb0.custom_mode}')
+    logger.info('[FC] sysid={} base_mode={:#010b} custom_mode={}',
+                c.target_system, hb0.base_mode, hb0.custom_mode)
 
-    # 텔레메트리 스트림 요청 (10Hz)
     c.mav.request_data_stream_send(
         c.target_system, c.target_component,
         mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1)
 
-    # GPS global origin 설정
     # alt=0이면 EKF가 1Hz마다 고도를 재계산해 LOCAL_POSITION_NED.z가 튀는 버그 있음
-    # 100000mm(=100m)으로 설정해 재계산 방지 (실제 고도와 무관, EKF 내부 참조값)
     c.mav.set_gps_global_origin_send(c.target_system, 0, 0, 100000)
 
-    # 메시지 캐시 초기화
     cache = {
-        'attitude':  None,   # ATTITUDE 메시지
-        'local_pos': None,   # LOCAL_POSITION_NED 메시지
-        'ekf':       None,   # EKF_STATUS_REPORT 메시지
-        'heartbeat': None,   # HEARTBEAT 메시지
-        'yaw':       0.0,    # 최신 yaw (라디안, ATTITUDE에서 추출)
-        'ack_queue': Queue(), # COMMAND_ACK 전달용 큐
+        'attitude':  None,
+        'local_pos': None,
+        'ekf':       None,
+        'heartbeat': None,
+        'yaw':       0.0,
+        'ack_queue': Queue(),
     }
     lock = threading.Lock()
     stop = threading.Event()
 
-    # 스레드 시작 (모두 daemon=True → 메인 종료 시 자동 종료)
     threading.Thread(
         target=_reader_loop, args=(c, cache, lock, stop), daemon=True).start()
     if start_vision:
@@ -273,13 +269,11 @@ def connect(uwb, start_vision=True):
             target=_vision_loop, args=(c, uwb, cache, lock, stop), daemon=True).start()
     threading.Thread(target=_hb_loop, args=(c, stop), daemon=True).start()
     threading.Thread(target=_rc_override_loop, args=(c, stop), daemon=True).start()
-    print(f'[THREAD] {ts()} 스레드 시작')
-    time.sleep(1)   # 스레드 안정화 + 첫 메시지 수신 대기
+    logger.info('[THREAD] 스레드 시작')
+    time.sleep(1)
 
-    # ── EKF 준비 대기 (최대 20초) ────────────────────────────────────────────
-    # att + vel_h + pos_rel + pos_abs 비트가 모두 set돼야 GUIDED 비행 가능
-    # 타임아웃 시 "강행" — ARMING_CHECK=0이면 ARM은 여전히 가능
-    print(f'[EKF] {ts()} 준비 대기...')
+    # EKF 준비 대기 (최대 20초)
+    logger.info('[EKF] 준비 대기...')
     deadline = time.time() + 20
     last_flags = None
     while time.time() < deadline:
@@ -289,63 +283,54 @@ def connect(uwb, start_vision=True):
             time.sleep(0.05)
             continue
         if m.flags != last_flags:
-            print(f'[EKF] {ts()} flags={m.flags:#06x} ({ekf_str(m.flags)})')
+            logger.info('[EKF] flags={:#06x} ({})', m.flags, ekf_str(m.flags))
             last_flags = m.flags
         if (m.flags & _EKF_NEED) == _EKF_NEED:
-            print(f'[EKF] {ts()} 준비 완료!')
+            logger.info('[EKF] 준비 완료!')
             break
     else:
-        print(f'[EKF] {ts()} 타임아웃 — 강행')
+        logger.warning('[EKF] 타임아웃 — 강행')
 
-    # ── GUIDED 모드 설정 ─────────────────────────────────────────────────────
-    # custom_mode=4 = GUIDED (ArduCopter 기준)
+    # GUIDED 모드 (custom_mode=4)
     cmd(c, mavutil.mavlink.MAV_CMD_DO_SET_MODE,
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 4, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
-    print(f'[MODE] {ts()} GUIDED ACK: {_MAV_RESULT.get(getattr(ack, "result", -1), "?")}')
+    logger.info('[MODE] GUIDED ACK: {}',
+                _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
 
-    # ── ARM ──────────────────────────────────────────────────────────────────
-    # param1=1: ARM 명령 (0이면 DISARM)
+    # ARM
     cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
     result = getattr(ack, 'result', -1)
-    print(f'[ARM] {ts()} ARM ACK: {_MAV_RESULT.get(result, "?")}')
+    logger.info('[ARM] ARM ACK: {}', _MAV_RESULT.get(result, '?'))
     if result != 0:
-        # pre-arm check 실패 (배터리, 센서, EKF 등) → FC 로그 확인 필요
-        print(f'[ARM] {ts()} ARM 실패 — pre-arm check 확인 필요')
+        logger.error('[ARM] ARM 실패 — pre-arm check 확인 필요')
         stop.set()
         return None, stop, None, None
 
-    # HEARTBEAT base_mode에서 ARM 플래그 확인 (ACK와 별개로 실제 상태 검증)
     t0 = time.time()
     while True:
         with lock:
             hb = cache['heartbeat']
         if hb and hb.base_mode & _ARMED:
-            print(f'[ARM] {ts()} ARMED! ({time.time()-t0:.1f}s)')
+            logger.info('[ARM] ARMED! ({:.1f}s)', time.time() - t0)
             break
         time.sleep(0.1)
-    time.sleep(0.5)   # ARM 직후 FC 내부 상태 안정화 대기
+    time.sleep(0.5)
     return c, stop, cache, lock
 
 
 def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
-    """NAV_TAKEOFF 명령 전송 + 목표 고도 도달 대기.
-
-    도달 판정: LOCAL_POSITION_NED.z < -(takeoff_m * 0.95)
-    (NED에서 z는 위쪽이 음수, 95%에 도달하면 성공으로 간주)
-    성공 True, ACK 거부 또는 타임아웃 False.
-    """
-    # param7=takeoff_m: 이륙 목표 고도 (m, AGL)
+    """NAV_TAKEOFF 명령 + 목표 고도 도달 대기. 성공 True, 실패 False."""
     cmd(c, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, float('nan'), 0, 0, takeoff_m)
     ack = _wait_ack(cache)
     result = getattr(ack, 'result', -1)
-    print(f'[TKOF] {ts()} TAKEOFF ACK: {_MAV_RESULT.get(result, "?")}')
+    logger.info('[TKOF] TAKEOFF ACK: {}', _MAV_RESULT.get(result, '?'))
     if result != 0:
         return False
 
-    target_z = -(takeoff_m * 0.95)   # 목표의 95% 고도 도달 시 성공 판정
-    deadline = time.time() + 20
+    target_z  = -(takeoff_m * 0.95)   # 목표의 95% 고도 도달 시 성공 판정
+    deadline  = time.time() + 20
     last_print = 0.0
     while time.time() < deadline:
         with lock:
@@ -356,34 +341,28 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
             continue
 
         if m.z < target_z:
-            print(f'[TKOF] {ts()} 고도 도달!')
+            logger.info('[TKOF] 고도 도달!')
             return True
 
-        # 0.1초마다 이륙 진행 상태 출력 (디버그용)
         now = time.time()
         if now - last_print >= 0.1:
             roll_deg  = math.degrees(att.roll)  if att else float('nan')
             pitch_deg = math.degrees(att.pitch) if att else float('nan')
-            print(f'[TKOF] {ts()} '
-                  f'z={m.z:.3f} vz={m.vz:.3f} | '
-                  f'x={m.x:.3f} y={m.y:.3f} vx={m.vx:.3f} vy={m.vy:.3f} | '
-                  f'roll={roll_deg:.1f}° pitch={pitch_deg:.1f}°')
+            logger.debug('[TKOF] z={:.3f} vz={:.3f} | x={:.3f} y={:.3f} | '
+                         'roll={:.1f}° pitch={:.1f}°',
+                         m.z, m.vz, m.x, m.y, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 
-    print(f'[TKOF] {ts()} 타임아웃')
+    logger.warning('[TKOF] 타임아웃')
     return False
 
 
 def do_land(c, stop, cache):
-    """NAV_LAND 명령 전송 + 모든 백그라운드 스레드 정지.
-
-    stop.set()으로 모든 daemon 스레드의 루프를 종료시킴.
-    스레드가 daemon이므로 메인이 끝나면 자동 종료되지만,
-    명시적으로 stop.set()을 호출해 즉시 루프를 빠져나오게 함.
-    """
+    """NAV_LAND 명령 + 모든 백그라운드 스레드 정지."""
     cmd(c, mavutil.mavlink.MAV_CMD_NAV_LAND, 0, 0, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
-    print(f'[LAND] {ts()} LAND ACK: {_MAV_RESULT.get(getattr(ack, "result", -1), "?")}')
+    logger.info('[LAND] LAND ACK: {}',
+                _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
     stop.set()
-    print(f'[DONE] {ts()} 완료')
+    logger.info('[DONE] 완료')

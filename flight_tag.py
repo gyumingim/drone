@@ -7,9 +7,10 @@ flight_tag.py — AprilTag + UWB 융합 호버링 (메인 비행 코드)
   1. UWB origin 확정 (앵커 기준 절대좌표 계산)
   2. 카메라 초기화 (RealSense 파이프라인 시작)
   3. FC 연결 → EKF 준비 → GUIDED 모드 → ARM
-  4. 이륙 1m (UWB VPE 없이 baro+IMU로 고도 제어)
-  5. _vision_loop 시작 → Tag/UWB VPE 20Hz 전송 + go_to 명령
-  6. Ctrl+C → 착륙
+  4. _vision_loop 시작 → UWB VPE 20Hz 전송 (이륙 중 EKF 위치 유지)
+  5. 이륙 1m
+  6. Tag 감지 시 Tag VPE + go_to 명령으로 수렴
+  7. Ctrl+C → 착륙
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 VPE(VISION_POSITION_ESTIMATE) 전략
@@ -40,9 +41,10 @@ VPE(VISION_POSITION_ESTIMATE) 전략
 import time
 import threading
 
+from loguru import logger
 from lib_uwb_reader import UWBReader
 from lib_tag_reader import TagReader
-from lib_common import connect, do_takeoff, do_land, go_to, ts, TAKEOFF_M
+from lib_common import connect, do_takeoff, do_land, go_to, TAKEOFF_M
 
 # 이륙 고도와 호버 고도를 동일하게 유지 (1m)
 HOVER_ALT = TAKEOFF_M
@@ -68,16 +70,16 @@ _COV_TAG[11] = 0.002
 def _vision_loop(c, uwb, tag, cache, lock, stop):
     """20Hz VPE 전송 루프 — Tag/UWB 소스 전환 및 EKF reset_counter 관리.
 
-    이 함수는 별도 스레드에서 실행되며 이륙 완료 후 시작됨.
-    이륙 중(baro 기반 고도 제어)에는 실행되지 않음.
+    이 함수는 별도 스레드에서 실행되며 FC 연결 직후(이륙 전)부터 시작됨.
+    이륙 중에도 UWB VPE를 전송해 EKF가 위치를 잃지 않도록 유지.
     """
-    prev_source = None   # 직전 VPE 소스 ('tag' | 'uwb' | None)
-    reset_cnt   = 0      # EKF frame reset 신호 (0~255 순환, 변경 시 EKF 좌표계 리셋)
-    last_vpe    = None   # (x, y, z) — tag+UWB 둘 다 없을 때 stale VPE 재전송용
+    prev_source = None  # 직전 VPE 소스 ('tag' | 'uwb' | None)
+    reset_cnt = 0       # EKF frame reset 신호 (0~255 순환, 변경 시 EKF 좌표계 리셋)
+    last_vpe = None     # (x, y, z) — tag+UWB 둘 다 없을 때 stale VPE 재전송용
 
     while not stop.is_set():
-        pose = tag.get_pose()   # (north, east, down, yaw) or None
-        now  = time.time()
+        pose = tag.get_pose()  # (north, east, down, yaw) or None
+        now = time.time()
 
         # 드론 현재 heading (나침반 없으면 gyro 적분값)
         # VPE yaw 필드에 넣어 EKF yaw 추정에 활용
@@ -93,7 +95,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             # reset_counter가 바뀌면 EKF가 이전 위치 추정을 버리고 새 값을 즉시 수용
             if prev_source != 'tag':
                 reset_cnt = (reset_cnt + 1) % 256
-                print(f'[VPE] {ts()} UWB→TAG 전환 (reset={reset_cnt})')
+                logger.info('[VPE] UWB→TAG 전환 (reset={})', reset_cnt)
 
             # 태그=(0,0) origin 좌표계에서 드론 위치 = (-n, -e)
             # 예: 태그가 드론 북쪽 0.3m → n=0.3 → 드론은 태그 기준 south(-0.3)
@@ -117,7 +119,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                 # TAG→UWB 전환 시 좌표계 변경 알림
                 if switching:
                     reset_cnt = (reset_cnt + 1) % 256
-                    print(f'[VPE] {ts()} TAG→UWB 전환 (reset={reset_cnt})')
+                    logger.info('[VPE] TAG→UWB 전환 (reset={})', reset_cnt)
 
                 # UWB 절대좌표를 VPE로 전송 (앵커 기준 절대좌표)
                 c.mav.vision_position_estimate_send(
@@ -147,7 +149,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     last_vpe[0], last_vpe[1], last_vpe[2],
                     0.0, 0.0, drone_yaw,
                     _cov_stale, reset_cnt)
-                print(f'[VPE] {ts()} 소스 없음 — 마지막 위치 유지 (stale)')
+                logger.debug('[VPE] 소스 없음 — 마지막 위치 유지 (stale)')
 
         time.sleep(0.05)   # 20Hz (50ms)
 
@@ -157,41 +159,41 @@ def main():
     # 이륙 후 UWB 폴백이 필요하므로 비행 전 origin 확정 필수
     uwb = UWBReader()
     uwb.start()
-    print(f'[UWB] {ts()} origin 확정 대기...')
+    logger.info('[UWB] origin 확정 대기...')
     while uwb.get_xy() is None:
         time.sleep(0.2)
-    print(f'[UWB] {ts()} origin 확정: {uwb.get_xy()}')
+    logger.info('[UWB] origin 확정: {}', uwb.get_xy())
 
     # ── 카메라 초기화 ─────────────────────────────────────────────────────────
     # RealSense 파이프라인은 start() 내부 스레드에서 비동기로 시작됨
     # 1초 대기: 파이프라인 초기화 + 첫 프레임 수신까지 시간 확보
     tag = TagReader()
     tag.start()
-    print(f'[TAG] {ts()} 카메라 초기화...')
+    logger.info('[TAG] 카메라 초기화...')
     time.sleep(1)
 
     # ── FC 연결 및 준비 ───────────────────────────────────────────────────────
-    # start_vision=False: 이륙 전 VPE 전송 안 함
-    # 이유: 이륙은 baro+IMU로 충분, _vision_loop는 이륙 완료 후 시작
-    #       (이륙 중 VPE가 없어도 ARMING_CHECK=0이면 ARM/TAKEOFF 정상 동작)
+    # start_vision=False: connect() 내장 UWB VPE 루프 미사용
+    # 대신 _vision_loop(아래)가 Tag+UWB 융합 VPE를 직접 담당
     c, stop, cache, lock = connect(uwb, start_vision=False)
     if c is None:
         return
+
+    # ── VPE 루프 시작 (이륙 전) ──────────────────────────────────────────────
+    # 이륙 중에도 UWB VPE가 전송돼야 EKF가 수평 위치를 잃지 않음.
+    # 이 루프를 do_takeoff() 뒤에 두면 이륙 중 EKF가 위치 추정을 잃을 수 있음.
+    threading.Thread(
+        target=_vision_loop,
+        args=(c, uwb, tag, cache, lock, stop),
+        daemon=True,
+    ).start()
 
     # ── 이륙 ─────────────────────────────────────────────────────────────────
     if not do_takeoff(c, stop, cache, lock):
         do_land(c, stop, cache)
         return
 
-    print(f'[HOVER] {ts()} 이륙 완료 — VPE 루프 시작, tag 감지 대기')
-
-    # ── VPE 루프 시작 ─────────────────────────────────────────────────────────
-    # 이륙 완료 후 시작 — Tag+UWB 융합 위치 추정 + go_to 명령
-    threading.Thread(
-        target=_vision_loop,
-        args=(c, uwb, tag, cache, lock, stop),
-        daemon=True,
-    ).start()
+    logger.info('[HOVER] 이륙 완료 — tag 감지 대기')
 
     # ── 메인 루프: Ctrl+C 대기 ───────────────────────────────────────────────
     try:

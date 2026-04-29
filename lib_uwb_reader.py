@@ -24,6 +24,7 @@ import time
 import threading
 
 import serial
+from loguru import logger
 
 PORT         = '/dev/ttyUSB0'  # UWB 태그 시리얼 포트
 BAUD         = 115200
@@ -103,7 +104,7 @@ class UWBReader:
                 # dsrdtr=False, rtscts=False: 하드웨어 흐름 제어 비활성화
                 # DWM1001은 흐름 제어 없이 단방향 전송 → 활성화 시 수신 차단 가능
                 with serial.Serial(PORT, BAUD, timeout=1, dsrdtr=False, rtscts=False) as ser:
-                    print(f'[UWB] {PORT} 연결')
+                    logger.info('[UWB] {} 연결', PORT)
                     while True:
                         raw = ser.readline().decode('ascii', errors='ignore').strip()
                         if not raw:
@@ -127,12 +128,12 @@ class UWBReader:
                             # ── origin 확정 전: 샘플 수집 단계 ────────────────
                             if count <= ORIGIN_SKIP:
                                 # 초기 불안정 샘플 버림 (DWM1001 부팅 직후 발산 방지)
-                                print(f'[UWB] 워밍업 {count}/{ORIGIN_SKIP}')
+                                logger.debug('[UWB] 워밍업 {}/{}', count, ORIGIN_SKIP)
                             else:
                                 self._samples.append((x, y, z))
                                 n = len(self._samples)
-                                print(f'[UWB] origin 수집 중 {n}/{ORIGIN_COUNT} '
-                                      f'({x:.3f}, {y:.3f}, {z:.3f})')
+                                logger.debug('[UWB] origin 수집 중 {}/{} ({:.3f}, {:.3f}, {:.3f})',
+                                             n, ORIGIN_COUNT, x, y, z)
 
                                 if n == ORIGIN_COUNT:
                                     # ORIGIN_COUNT개 평균 → origin 확정
@@ -141,7 +142,7 @@ class UWBReader:
                                     oz = sum(s[2] for s in self._samples) / n
                                     with self._lock:
                                         self._origin = (ox, oy, oz)
-                                    print(f'[UWB] origin 확정 ({ox:.3f}, {oy:.3f}, {oz:.3f})')
+                                    logger.info('[UWB] origin 확정 ({:.3f}, {:.3f}, {:.3f})', ox, oy, oz)
 
                             continue  # origin 확정 전엔 _pos 갱신 안 함
 
@@ -155,5 +156,5 @@ class UWBReader:
                 msg = str(e)
                 with self._lock:
                     self._last_error = msg
-                print(f'[UWB] 에러: {msg} — 3초 후 재연결')
+                logger.error('[UWB] 에러: {} — 3초 후 재연결', msg)
                 time.sleep(3)

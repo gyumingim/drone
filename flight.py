@@ -11,8 +11,9 @@ flight.py — UWB 기반 제자리 이착륙 (tag 미사용)
 용도: 카메라/AprilTag 없이 UWB만으로 기본 이착륙 검증용
 """
 import time
+from loguru import logger
 from lib_uwb_reader import UWBReader
-from lib_common import connect, do_takeoff, do_land, ts, HOVER_S
+from lib_common import connect, do_takeoff, do_land, HOVER_S
 
 
 def main():
@@ -21,10 +22,10 @@ def main():
     # origin 확정 전에 비행하면 EKF 위치 기준이 없어 위험
     uwb = UWBReader()
     uwb.start()
-    print(f'[UWB] {ts()} origin 대기...')
+    logger.info('[UWB] origin 대기...')
     while uwb.get_xy() is None:
         time.sleep(0.2)
-    print(f'[UWB] {ts()} origin 확정: {uwb.get_xy()}')
+    logger.info('[UWB] origin 확정: {}', uwb.get_xy())
 
     # ── FC 연결 및 준비 ───────────────────────────────────────────────────────
     # connect() 내부에서:
@@ -44,13 +45,13 @@ def main():
         return
 
     # ── 호버 ─────────────────────────────────────────────────────────────────
-    print(f'[HOVR] {ts()} 호버 {HOVER_S}s')
+    logger.info('[HOVR] 호버 {}s', HOVER_S)
     deadline = time.time() + HOVER_S
     while time.time() < deadline:
         # UWB 신호 유실 감지 → 위치 추정 불가 → 즉시 착륙
         # VPE가 끊기면 EKF가 위치 추정을 잃고 드론이 drift할 수 있어 안전 착륙
         if uwb.get_xy() is None:
-            print(f'[SAFE] {ts()} UWB 끊김 — 착륙')
+            logger.warning('[SAFE] UWB 끊김 — 착륙')
             break
         time.sleep(0.5)
 
