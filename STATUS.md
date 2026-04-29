@@ -1,201 +1,76 @@
-# 드론 프로젝트 진행 상황
+# 드론 프로젝트 STATUS
 
 ## 전체 목표
-UWB(XY) + 바로미터(Z) 기반 실내 자율 비행 — ArduPilot GUIDED 모드
+AprilTag + UWB 융합 실내 자율 호버링 드론
 
 ## 사용 기술
-- FC: ArduPilot (GUIDED mode, MAVLink)
-- XY 위치: DWM1001 UWB → VISION_POSITION_ESTIMATE
-- Z 위치: EKF3 바로미터 (EK3_SRC1_POSZ=1)
-- 통신: pymavlink (USB serial /dev/ttyACM0 57600baud)
-- UWB: /dev/ttyUSB0 115200baud, `lec` 명령 (CSV DIST 포맷), 삼변측량은 소프트웨어에서 직접 계산
+- ArduCopter 4.6.x, GUIDED 모드
+- UWB (DWM1001) — 실내 수평 위치 추정
+- RealSense D435i + AprilTag (tag36h11) — 정밀 위치 수렴
+- VISION_POSITION_ESTIMATE (MAVLink #102) — EKF 외부 위치 입력
+- pymavlink (MAVLink 2), loguru, pyrealsense2
 
 ## 파일 구조
 | 파일 | 역할 |
-|------|------|
-| `common.py` | 공유 상수·헬퍼·쓰레드·connect/do_takeoff/do_land/go_to/wait_pos |
-| `flight.py` | 제자리 이착륙 (1m 호버 5s) |
-| `mission.py` | 이륙 → 동쪽 1m → 원점 복귀 → 착륙 |
-| `uwb_reader.py` | UWB 시리얼 파싱 (lec 포맷, scipy 삼변측량) |
-| `monitor.py` | 비행 없이 텔레메트리 모니터링 전용 |
-| `dashboard.py` | Rich TUI 대시보드 (DroneData + render) |
+|---|---|
+| `lib_common.py` | 공유 상수·헬퍼·스레드·connect/takeoff/land/go_to |
+| `lib_uwb_reader.py` | DWM1001 시리얼 파싱, origin 보정 |
+| `lib_tag_reader.py` | RealSense + AprilTag pose 추출 |
+| `flight.py` | UWB 기반 제자리 이착륙 |
+| `mission.py` | UWB 기반 웨이포인트 비행 |
+| `flight_tag.py` | AprilTag + UWB 융합 호버링 |
+| `dbg_monitor.py` | 텔레메트리 + UWB 실시간 모니터링 |
+| `dbg_uwb_debug.py` | UWB 시리얼 단독 디버그 |
+| `dbg_tag_test.py` | AprilTag 감지 테스트 + 시각화 |
 
-## 필수 FC 파라미터 (Mission Planner에서 설정)
-
+## 필수 FC 파라미터
 | 파라미터 | 값 | 의미 |
-|----------|-----|------|
-| EK3_SRC1_POSXY | 6 | XY 위치 소스 = ExternalNav (UWB) |
-| EK3_SRC1_POSZ | 1 | Z 위치 소스 = Baro |
-| EK3_SRC1_YAW | 6 | Yaw 소스 = ExternalNav |
-| ARMING_CHECK | 0 | pre-arm check 전부 비활성화 (가속도계 캘리 후 ARM FAILED 우회용) |
+|---|---|---|
+| EK3_SRC1_POSXY | 6 | XY = ExternalNav (UWB) |
+| EK3_SRC1_POSZ | 1 | Z = Baro |
+| EK3_SRC1_YAW | 6 | Yaw = ExternalNav |
+| ARMING_CHECK | 0 | pre-arm check 비활성화 |
 | VISO_TYPE | 1 | Visual Odometry = MAVLink |
 
-> **비행 전 반드시**: ARMING_CHECK=0 설정되어 있는지 확인. 없으면 MAVLink ARM 항상 실패.
+---
 
-## UWB 앵커 구성
+## 했던 일
 
-- 앵커 3개: `33BB`, `31D1`, `31D0`
-- 태그 → 앵커 거리 → `uwb_reader.py`에서 scipy 삼변측량으로 XY 계산
-- lec 포맷: `DIST,N,0,ID,x,y,z,dist,...` (N=앵커 수)
-- 앵커 좌표는 DWM1001 네트워크 설정에 저장됨 (lec 응답에 포함)
+- [x] 파일 접두사 정리 (`lib_*`, `dbg_*`)
+- [x] 카메라 180° 장착 보정 → `cv2.ROTATE_180` 이미지 선회전
+- [x] loguru 마이그레이션 (전체 파일 `print()` 제거)
+- [x] `flight_tag.py` VPE 버그 수정 (`_vision_loop` → `do_takeoff()` 전으로 이동)
+- [x] EKF z +131m 버그 수정 (`SET_GPS_GLOBAL_ORIGIN alt=0` → `alt=100000`)
+- [x] 호버 위치 고정 개선 (`go_to()` 2Hz 반복 전송 → PosVelAccel 유지)
+- [x] `mission.py` 시퀀스 변경 (이륙→1초→북 0.5m→1초 호버→착륙)
+- [x] `_hover()` 헬퍼 추가 (go_to 반복 + UWB 끊김 감시)
+- [x] 단일 리더 스레드 아키텍처 (recv_match 충돌 해결)
+- [x] HARNESS.md 규칙 추가 (깃허브 코드 직접 확인, STATUS.md 수시 업데이트)
 
-## 실행 방법
+## 하고 있는 일
 
-```bash
-# 1. 모니터링만 (비행 없음, 텔레메트리 확인용)
-cd /home/karma/drone
-python3 monitor.py
+- [ ] GitHub MCP 서버 설치 (PAT 발급 대기 중)
 
-# 2. 제자리 이착륙 (1m 호버 5s)
-python3 flight.py
+## 할 일
 
-# 3. 동쪽 1m 왕복 미션
-python3 mission.py
-```
+- [ ] GitHub MCP 설치 완료
+- [ ] 실제 하드웨어 비행 테스트
+  - [ ] `dbg_tag_test.py` — AprilTag NED 방향 검증 (north>0 확인)
+  - [ ] `dbg_monitor.py` — EKF/UWB 정상 동작 확인
+  - [ ] `flight.py` — 이착륙 + 위치 고정 테스트
+  - [ ] `mission.py` — 북 0.5m 웨이포인트 테스트
+  - [ ] `flight_tag.py` — AprilTag 수렴 테스트
 
-**주의사항:**
-- 실행 전 드론을 UWB +x 방향으로 물리적 정렬 필요 (yaw 기준)
-- FC 리부팅 후 실행 권장 (baro 기준점 리셋)
-- ARMING_CHECK=0 확인 필수
+---
 
-## 현재 동작 상태 (2026-04-28 기준)
-
-| 스크립트 | 상태 | 비고 |
-|----------|------|------|
-| `monitor.py` | 동작 확인 | Rich 대시보드 정상 출력 |
-| `flight.py` | 동작 확인 | 1m 호버 후 착륙, 위치 유지 확인 |
-| `mission.py` | 미테스트 | 북→동→남→서→원점 0.5m, 실제 비행 미확인 |
-
-## 완료한 것
-- [x] UWB XY + 바로미터 Z EKF3 설정 확인
-- [x] VISION_POSITION_ESTIMATE 20Hz 전송 (yaw echo-back)
-- [x] RC override 루프로 RC failsafe 방지 (모터 불동 버그 수정)
-- [x] GCS heartbeat 1Hz 유지
-- [x] EKF 준비 대기 (flags 0x033f 확인)
-- [x] COMMAND_ACK 확인 (모든 명령)
-- [x] 제자리 이착륙 동작 확인 (flight.py) — hover 5s 후 원점 복귀 확인
-- [x] common.py 분리 리팩토링
-- [x] mission.py 기본 구조 작성
-- [x] UWB lec 포맷으로 전환 + scipy 삼변측량 직접 구현
-- [x] dashboard.py + monitor.py 작성 (비행 없이 텔레메트리 확인)
-- [x] ARM FAILED 시 즉시 종료 처리 (connect() 반환값 None 처리)
-- [x] do_takeoff() 디버그 로그 강화 (x,y,vx,vy,roll,pitch 추가)
-- [x] EKF baro 오프셋 버그 원인 파악 (리부팅으로 해결, SET_GPS_GLOBAL_ORIGIN 충돌)
-- [x] UWB 3D 속도 필터 (2m/s 초과 측정값 reject) — 비행 중 UWB 점프 방지
-- [x] 단일 리더 스레드 리팩토링 — yaw=0 고정, roll/pitch NaN 두 문제 동시 해결
-
-## 단일 리더 스레드 아키텍처 (2026-04-28 적용)
-
-**문제:** 4개 스레드가 동시에 `recv_match()` 호출 → 메시지 소비 충돌
-- `_status_loop`가 ATTITUDE 소비 → `_vision_loop`에서 yaw 항상 0
-- 비행 로그에서 `yaw=-0.000rad` 고정, `roll/pitch NaN` 지속 확인
-
-**근거:**
-- pymavlink 공식: "mavlink_connection is not thread-safe" (Google Groups)
-- DroneKit, Udacity udacidrone 동일 패턴 사용 확인
-- 시뮬레이션 검증: 멀티스레드 시 15개 중 10개 유실, 단일 리더 시 0개 유실
-
-**해결:** `_reader_loop` 단 하나만 `recv_match` 호출 → `cache` dict에 저장
-```
-cache = {
-    'attitude': ..., 'local_pos': ..., 'ekf': ...,
-    'heartbeat': ..., 'yaw': 0.0, 'ack_queue': Queue()
-}
-```
-- `_vision_loop` → `cache['yaw']` 읽기
-- `do_takeoff` → `cache['local_pos']`, `cache['attitude']` 읽기
-- `connect()` → `(c, stop, cache, lock)` 반환 (기존 `(c, stop)`에서 변경)
-- COMMAND_ACK → `Queue`로 처리 (`_wait_ack(cache)`)
-
-## 비행 테스트 결과 (2026-04-28)
-
-mission.py 북→동→남→서→원점 0.5m 테스트 결과:
-
-**해결된 것:**
-- roll/pitch NaN → 실제 값 출력 (roll=0.4°, pitch=-0.9°)
-- yaw=0 고정 → 실제 heading 반영 (0.002 ~ -1.879rad 변화)
-- 북/동/남 웨이포인트 도달 성공
-
-**남은 문제:**
-- UWB 측정값 비행 중 거의 전부 reject (28m/s 등 물리적으로 불가능한 점프)
-- EKF가 UWB 못 믿고 IMU 추측항법으로 비행 → 위치 정확도 낮음
-- VIS xy와 NAV pos 값 완전히 불일치 (UWB 신뢰도 0에 가까움)
-- 비행 중 yaw 크게 변함 (드론 의도치 않은 회전)
-
-**UWB 불안정 원인 후보:**
-1. 모터 진동 → UWB 안테나 영향
-2. 앵커와 시선 차단 (드론 이동 중 몸체가 앵커 가림)
-3. 전파 반사 (multipath) — 실내 벽, 금속 구조물
-
-**다음 확인 방법:** 드론을 손으로 들고 이동하면서 monitor.py로 UWB XY 안정성 확인
-
-## 하고 있는 것
-- [ ] UWB 측정 안정성 확인 (손으로 이동 테스트)
-
-## 할 것
-- [ ] UWB 안테나 위치 개선 (진동 차단, 앵커 시선 확보)
-- [ ] wait_pos 도달 조건 튜닝 (현재 tol=0.3m)
-- [ ] UWB 신호 끊김 안전 로직 mission.py에도 추가
-- [ ] UWB 속도 필터 임계값 튜닝 (현재 2m/s)
-
-## 좌표계 정렬 주의사항
-
-**현재 코드는 UWB (x,y) → NED (north,east) 로 그대로 매핑함.**
-따라서 `go_to(0, 1, -1)` 가 실제로 "동쪽 1m" 로 날아가려면:
-
-> **드론 시작 시 UWB +x 방향을 향하고 있어야 함**
-
-- EK3_SRC1_YAW=6 (ExternalNav): 코드가 초기에 yaw=0.0 을 EKF에 전송
-- EKF가 그 순간 드론이 향하던 방향을 NED North(0°)로 고정
-- 이후 IMU(자이로) 적분으로 yaw 변화 추적 + echo-back으로 드리프트 방지
-- 결론: UWB +x ≠ 드론 초기 헤딩이면 go_to 이동 방향이 틀어짐
-
-## Yaw 정확도 향상 방법 조사 결과
-
-| 방법 | 정확도 | 실내 사용 | 비고 |
-|------|--------|----------|------|
-| **나침반 (기본값)** | 중 | △ | 모터·ESC 자기 간섭 심함, 실내 부적합 |
-| **IMU 자이로 적분 (현재)** | 낮음 | ○ | 장시간 드리프트 누적 |
-| **Dual GPS yaw** | 높음 | ✗ | GPS 없는 실내 사용 불가 |
-| **GSF (EK3_SRC1_YAW=8)** | 중 | ✗ | GPS velocity 기반, 실내 불가 |
-| **광학 흐름 센서 (Optical Flow)** | 중 | ○ | 하향 카메라 필요, yaw 직접 측정은 아님 |
-| **비전 오도메트리 (T265 등)** | 높음 | ○ | 카메라 기반 6DOF, yaw 포함 |
-| **UWB 2태그 헤딩** | 높음 | ○ | 드론에 UWB 태그 2개 장착 → 두 좌표 차로 heading 계산 |
-| **운용 규칙 (현실적)** | 중 | ○ | 매 비행마다 드론을 UWB +x 방향으로 정렬하고 시작 |
-
-**가장 현실적인 단기 해결책**: 드론 시작 전 UWB +x 축 방향으로 물리적으로 정렬하는 운용 규칙 적용.
-**장기 해결책**: UWB 태그 2개로 heading 직접 계산 or 비전 오도메트리 추가.
-
-ref: [ArduPilot Compassless Operation](https://ardupilot.org/copter/docs/common-compassless.html), [EKF Source Selection](https://ardupilot.org/copter/docs/common-ekf-sources.html)
-
-## 주요 문제점 & 해결방안
+## 문제점 및 해결방안
 
 | 문제 | 원인 | 해결 |
-|------|------|------|
-| 모터 불동 (arm 후) | RC3=0 → 스로틀 failsafe | RC override ch3=1000 5Hz 전송 |
-| 이륙 타임아웃 | vz 임계값(-0.2) 미달, 바로미터 드리프트 오탐 | vz 기반 감지로 변경 |
-| 이륙 후 낙하 후 이동 | do_takeoff 조기 리턴 | 고도 도달+속도 안정 조건 추가 |
-| yaw=0 강제시 EKF 발산 | UWB 프레임 vs FC 프레임 불일치 | echo-back yaw 유지 |
-| SerialException (status_loop) | 멀티쓰레드 시리얼 충돌 | non-blocking + try/except |
-| RC로 멈추기 불가 | RC override가 ch1~ch8 전부 덮어씀 | ch3만 override, 나머지 release(0) |
-| ARM ACK: FAILED | 가속도계 캘리 후 pre-arm check 강화 | ARMING_CHECK=0 설정 (GCS/Mission Planner) |
-| z=+4.587m 이륙 안됨 | SET_GPS_GLOBAL_ORIGIN(alt=0) + EEPROM 홈 고도 충돌 | FC 리부팅 (EKF baro 기준점 리셋) |
-| UWB XY 미출력 | 장치가 lep auto-stream 모드로 고정 | lec 명령 재전송 + 접속시 escape sequence 전송 |
-| roll/pitch = NaN | 멀티스레드 recv_match 충돌로 ATTITUDE 소비됨 | 단일 리더 스레드로 해결 (2026-04-28) |
-| yaw=0 고정 | 동일한 멀티스레드 충돌 | 단일 리더 스레드로 해결 (2026-04-28) |
-| 비행 중 UWB 4m 점프 | 삼변측량 오류 or 신호 반사 | 3D 속도 필터 2m/s 추가 (2026-04-28) |
-| 이륙 중 vy 드리프트 | 원인 조사 중 — yaw/roll/pitch 수정 후 재비행 필요 | 미해결 |
-
-## 참고 문서 (검증된 출처)
-
-| 항목 | URL | 핵심 내용 |
-|------|-----|-----------|
-| pymavlink 스레드 안전성 | https://groups.google.com/g/mavlink/c/ZnJzT2CMN8c | thread-safe 아님, 단일 리더 스레드 공식 권장 |
-| pymavlink 가이드 | https://mavlink.io/en/mavgen_python/ | 공식 사용법 |
-| Non-GPS 위치 추정 | https://ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html | VPE 4Hz 이상, Z cov 높게 |
-| EKF3 소스 선택 | https://ardupilot.org/copter/docs/common-ekf-sources.html | EK3_SRC1_* 파라미터 |
-| RC_CHANNELS_OVERRIDE | https://mavlink.io/en/messages/common.html#RC_CHANNELS_OVERRIDE | ch=0 은 release 공식 정의 |
-| DWM1001 lec 포맷 | https://forum.qorvo.com/t/lec-command-output-in-uart-shell-mdek1001/5075 | UART lec CSV 포맷 |
-| Optitrack 예제 | https://ardupilot.org/copter/docs/common-optitrack.html | ExternalNav 설정 구조 동일 |
-
-> 전체 검증 결과: [VALIDATION.md](VALIDATION.md)
+|---|---|---|
+| EKF z +131m 급상승 | `SET_GPS_GLOBAL_ORIGIN(alt=0)` → baro 1Hz 리셋 ArduPilot 버그 | `alt=100000`(100m 더미) |
+| 이륙 중 위치 유실 | `_vision_loop` takeoff 후 시작 | takeoff 전으로 이동 |
+| 호버 중 drift | `hold_position()` VelAccel만 유지, 바람에 복귀 안 함 | `go_to()` 2Hz 반복 전송 |
+| 180° 카메라 NED 오류 | raw 이미지 뒤집힘 | `cv2.ROTATE_180` 선회전 |
+| roll/pitch NaN | 멀티스레드 recv_match 충돌 | 단일 리더 스레드 |
+| yaw=0 고정 | 동일한 멀티스레드 충돌 | 단일 리더 스레드 |
+| ARM FAILED | pre-arm check | ARMING_CHECK=0 |
