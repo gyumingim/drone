@@ -32,6 +32,7 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | ARMING_CHECK | 0 | pre-arm check 비활성화 |
 | VISO_TYPE | 1 | Visual Odometry = MAVLink |
 | VISO_YAW_M_NSE | 0.05 | yaw 측정 노이즈(rad). 기본 0.2(≈11.5°) → 0.05로 낮춰야 ArduPilot 내부 하한(5°=0.087rad)까지 활용 가능 |
+| VISO_DELAY_MS | 82 | VPE 전송 지연(ms). 카메라 노출→yaw 완료 실측값 82ms. 기본 25ms로 두면 EKF가 잘못된 IMU 시각에 융합함 |
 
 ---
 
