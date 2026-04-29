@@ -9,8 +9,8 @@ NED 프레임 기준:
 """
 import time
 from pymavlink import mavutil
-from uwb_reader import UWBReader
-from common import (
+from lib_uwb_reader import UWBReader
+from lib_common import (
     connect, do_takeoff, do_land,
     go_to, wait_pos, cmd,
     ts, TAKEOFF_M,

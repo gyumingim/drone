@@ -1,7 +1,7 @@
 """uwb_debug.py — UWB 시리얼 단독 디버그 (대시보드 없음)"""
 import time
 import serial
-from uwb_reader import PORT, BAUD, _parse_pos
+from lib_uwb_reader import PORT, BAUD, _parse_pos
 
 print(f'[DEBUG] {PORT} 열기 시도...')
 try:

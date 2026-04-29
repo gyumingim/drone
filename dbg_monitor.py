@@ -4,8 +4,8 @@ import threading
 import sys
 
 from pymavlink import mavutil
-from uwb_reader import UWBReader
-from common import FC_PORT, FC_BAUD
+from lib_uwb_reader import UWBReader
+from lib_common import FC_PORT, FC_BAUD
 
 _SEV = ['EMERG', 'ALERT', 'CRIT', 'ERR', 'WARN', 'NOTICE', 'INFO', 'DEBUG']
 _GUIDED = 4

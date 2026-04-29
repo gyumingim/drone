@@ -9,7 +9,7 @@ import math
 import time
 import cv2
 import numpy as np
-from tag_reader import TagReader, TAG_SIZE_M
+from lib_tag_reader import TagReader, TAG_SIZE_M
 
 DEADBAND_M = 0.08  # flight_tag.py 와 동일
 COV_TAG = 0.002

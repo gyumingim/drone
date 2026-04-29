@@ -1,7 +1,7 @@
 """flight.py — 제자리 이착륙 (1m 호버)"""
 import time
-from uwb_reader import UWBReader
-from common import connect, do_takeoff, do_land, ts, HOVER_S
+from lib_uwb_reader import UWBReader
+from lib_common import connect, do_takeoff, do_land, ts, HOVER_S
 
 
 def main():

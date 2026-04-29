@@ -13,9 +13,9 @@ VPE 전략:
 import time
 import threading
 
-from uwb_reader import UWBReader
-from tag_reader import TagReader
-from common import connect, do_takeoff, do_land, go_to, ts, TAKEOFF_M
+from lib_uwb_reader import UWBReader
+from lib_tag_reader import TagReader
+from lib_common import connect, do_takeoff, do_land, go_to, ts, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
 
