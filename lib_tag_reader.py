@@ -66,7 +66,7 @@ class TagReader:
         self._lock = threading.Lock()
         self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
         self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
-        self._latency = (0.0, 0.0) # (detect_ms, total_ms) — 최근 프레임 측정값
+        self._latency = (0.0, 0.0, 0.0) # (detect_ms, total_ms, full_ms) — 최근 프레임 측정값
         self._detector = Detector(families=TAG_FAMILY)
 
     def start(self):
@@ -84,7 +84,8 @@ class TagReader:
             return self._frame.copy() if self._frame is not None else None
 
     def get_latency(self):
-        """(detect_ms, total_ms) 반환 — detect: detector.detect() 소요, total: 프레임→pose 전체."""
+        """(detect_ms, total_ms, full_ms) 반환.
+        detect: detector.detect() 소요 / total: 프레임수신→pose / full: 카메라노출→yaw완료."""
         with self._lock:
             return self._latency
 
@@ -123,11 +124,13 @@ class TagReader:
 
                 _frame_count = 0
                 while True:
-                    t_frame = time.time()
                     frames = pipeline.wait_for_frames(timeout_ms=2000)
                     color = frames.get_color_frame()
                     if not color:
                         continue
+                    # 카메라 노출 시각 (global_time = 시스템 클럭 기준 ms)
+                    t_capture_ms = color.get_timestamp()
+                    t_frame = time.time()
 
                     img = np.asanyarray(color.get_data())  # BGR, (480, 640, 3)
 
@@ -154,12 +157,16 @@ class TagReader:
                     )
                     detect_ms = (time.time() - t_detect) * 1000
                     total_ms = (time.time() - t_frame) * 1000
+                    # 카메라 노출 시각 기준 전체 latency (노출→yaw 완료)
+                    # t_capture_ms: global_time(시스템 클럭 ms), time.time()*1000: 현재 시스템 ms
+                    full_ms = time.time() * 1000 - t_capture_ms
                     with self._lock:
-                        self._latency = (detect_ms, total_ms)
+                        self._latency = (detect_ms, total_ms, full_ms)
                     _frame_count += 1
                     if _frame_count % 30 == 1:  # 30프레임마다 1회 출력 (~1초)
-                        logger.debug('[TAG] latency  detect={:.1f}ms  total={:.1f}ms',
-                                     detect_ms, total_ms)
+                        logger.debug(
+                            '[TAG] latency  detect={:.1f}ms  total={:.1f}ms  full={:.1f}ms',
+                            detect_ms, total_ms, full_ms)
 
                     # 특정 ID만 추적할 경우 필터링 (tag_id=None이면 전체 허용)
                     if self._tag_id is not None:

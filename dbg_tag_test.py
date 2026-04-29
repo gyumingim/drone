@@ -32,7 +32,7 @@ def _put(img, text, y, color=(200, 200, 200), scale=0.52):
 def draw_hud(frame, pose, latency):
     h, w = frame.shape[:2]
     PANEL = 175
-    detect_ms, total_ms = latency
+    detect_ms, total_ms, full_ms = latency
 
     # 하단 반투명 패널
     roi = frame[h - PANEL:h]
@@ -82,7 +82,7 @@ def draw_hud(frame, pose, latency):
              f'go_to   dN={n:+.3f}m  dE={e:+.3f}m  (tag world 기준)',
              y0 + dy * 3)
         _put(frame,
-             f'tag_size={TAG_SIZE_M}m  |  detect={detect_ms:.1f}ms  total={total_ms:.1f}ms',
+             f'detect={detect_ms:.1f}ms  total={total_ms:.1f}ms  full={full_ms:.1f}ms',
              y0 + dy * 4 + 4, (120, 120, 120))
     else:
         cv2.putText(frame, 'o NOT DETECTED', (10, 28),
@@ -97,7 +97,7 @@ def draw_hud(frame, pose, latency):
              y0 + dy * 2, (180, 180, 100))
         _put(frame, 'go_to   --- (tag 미감지)', y0 + dy * 3)
         _put(frame,
-             f'tag_size={TAG_SIZE_M}m  |  detect={detect_ms:.1f}ms  total={total_ms:.1f}ms',
+             f'detect={detect_ms:.1f}ms  total={total_ms:.1f}ms  full={full_ms:.1f}ms',
              y0 + dy * 4 + 4, (120, 120, 120))
 
     return frame
