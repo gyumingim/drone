@@ -358,6 +358,25 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     return False
 
 
+def start_depth_sender(c, tag, stop):
+    """TagReader depth 고도를 DISTANCE_SENSOR 20Hz로 전송하는 백그라운드 스레드 시작.
+
+    EK3_SRC1_POSZ=2(Rangefinder) + RNGFND1_TYPE=10(MAVLink) 설정 필요.
+    orientation=25 = MAV_SENSOR_ROTATION_PITCH_270 (하향).
+    """
+    def _loop():
+        while not stop.is_set():
+            depth_alt = tag.get_depth_alt()
+            if depth_alt:
+                c.mav.distance_sensor_send(
+                    0, 10, 1000,
+                    int(depth_alt * 100),
+                    0, 0, 25, 0,
+                )
+            time.sleep(0.05)  # 20Hz
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def do_land(c, stop, cache):
     """NAV_LAND 명령 + 모든 백그라운드 스레드 정지."""
     cmd(c, mavutil.mavlink.MAV_CMD_NAV_LAND, 0, 0, 0, 0, 0, 0, 0)

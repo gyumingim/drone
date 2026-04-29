@@ -20,10 +20,11 @@ import time
 from loguru import logger
 from pymavlink import mavutil
 from lib_uwb_reader import UWBReader
+from lib_tag_reader import TagReader
 from lib_common import (
     connect, do_takeoff, do_land,
     go_to, wait_pos, cmd,
-    TAKEOFF_M,
+    start_depth_sender, TAKEOFF_M,
 )
 
 SPEED_MS = 0.3          # 순항 속도 (m/s) — 실내 기준 보수적 값
@@ -52,6 +53,12 @@ def _hover(c, uwb, x, y, secs):
 
 
 def main():
+    # ── 카메라 초기화 (depth 고도 소스) ─────────────────────────────────────
+    tag = TagReader()
+    tag.start()
+    logger.info('[TAG] 카메라 초기화...')
+    time.sleep(1)
+
     # ── UWB origin 확정 ──────────────────────────────────────────────────────
     uwb = UWBReader()
     uwb.start()
@@ -64,6 +71,9 @@ def main():
     c, stop, cache, lock = connect(uwb)
     if c is None:
         return
+
+    # ── depth DISTANCE_SENSOR 전송 시작 ──────────────────────────────────────
+    start_depth_sender(c, tag, stop)
 
     # ── 이륙 ─────────────────────────────────────────────────────────────────
     if not do_takeoff(c, stop, cache, lock):

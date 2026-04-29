@@ -13,13 +13,18 @@ flight.py — UWB 기반 제자리 이착륙 (tag 미사용)
 import time
 from loguru import logger
 from lib_uwb_reader import UWBReader
-from lib_common import connect, do_takeoff, do_land, go_to, HOVER_S, TAKEOFF_M
+from lib_tag_reader import TagReader
+from lib_common import connect, do_takeoff, do_land, go_to, start_depth_sender, HOVER_S, TAKEOFF_M
 
 
 def main():
+    # ── 카메라 초기화 (depth 고도 소스) ─────────────────────────────────────
+    tag = TagReader()
+    tag.start()
+    logger.info('[TAG] 카메라 초기화...')
+    time.sleep(1)
+
     # ── UWB origin 확정 ──────────────────────────────────────────────────────
-    # origin이 확정돼야 get_xy()가 None이 아닌 값을 반환함
-    # origin 확정 전에 비행하면 EKF 위치 기준이 없어 위험
     uwb = UWBReader()
     uwb.start()
     logger.info('[UWB] origin 대기...')
@@ -35,8 +40,10 @@ def main():
     #   - _rc_override_loop: throttle failsafe 방지용 RC override
     c, stop, cache, lock = connect(uwb)
     if c is None:
-        # ARM 실패 등 connect 내부 오류 → 종료
         return
+
+    # ── depth DISTANCE_SENSOR 전송 시작 ──────────────────────────────────────
+    start_depth_sender(c, tag, stop)
 
     # ── 이륙 ─────────────────────────────────────────────────────────────────
     # do_takeoff 실패 시 (ACK 거부 or 고도 미달) 즉시 착륙 후 종료
