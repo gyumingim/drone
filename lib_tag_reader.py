@@ -66,8 +66,9 @@ class TagReader:
         self._lock = threading.Lock()
         self._pose = None          # 태그 미감지 시 None — flight_tag가 UWB로 전환
         self._frame = None         # 오버레이된 BGR 이미지 (tag_test.py 시각화 전용)
-        self._latency = (0.0, 0.0, 0.0) # (detect_ms, total_ms, full_ms) — 최근 프레임 측정값
-        self._depth_alt = None           # 하향 depth 센서 기반 고도 (m), 유효하지 않으면 None
+        self._latency = (0.0, 0.0, 0.0)      # (detect_ms, total_ms, full_ms) — 최근 프레임 측정값
+        self._depth_alt = None               # 하향 depth 센서 기반 고도 (m), 유효하지 않으면 None
+        self._depth_latency = (0.0, 0.0)    # (proc_ms, full_ms) — depth 계산시간 / 캡처→준비 전체지연
         self._detector = Detector(families=TAG_FAMILY, nthreads=2, quad_decimate=2.0)
 
     def start(self):
@@ -88,6 +89,11 @@ class TagReader:
         """하향 depth 센서로 측정한 고도 (m). 유효하지 않으면 None."""
         with self._lock:
             return self._depth_alt
+
+    def get_depth_latency(self):
+        """(proc_ms, full_ms) — 5×5 median 계산 시간 / depth 캡처→값 준비 전체 지연."""
+        with self._lock:
+            return self._depth_latency
 
     def get_latency(self):
         """(detect_ms, total_ms, full_ms) 반환.
@@ -148,14 +154,21 @@ class TagReader:
                     # get_distance()는 depth_scale 적용된 미터값 반환
                     depth = frames.get_depth_frame()
                     if depth:
+                        t_depth_cap = depth.get_timestamp()  # 하드웨어 캡처 시각 (ms)
+                        t_d = time.time()
                         ds = [depth.get_distance(212 + dx, 120 + dy)
                               for dx in range(-2, 3) for dy in range(-2, 3)]
                         ds = [d for d in ds if d > 0]
                         _depth_alt = float(np.median(ds)) if ds else None
+                        depth_proc_ms = (time.time() - t_d) * 1000
+                        depth_full_ms = time.time() * 1000 - t_depth_cap
                     else:
                         _depth_alt = None
+                        depth_proc_ms = 0.0
+                        depth_full_ms = 0.0
                     with self._lock:
                         self._depth_alt = _depth_alt
+                        self._depth_latency = (depth_proc_ms, depth_full_ms)
 
                     # ── 180° 이미지 선회전 (pre-rotation) ───────────────────────
                     # 카메라가 물리적으로 180° 돌아 있으므로 raw 이미지도 뒤집혀 있음.

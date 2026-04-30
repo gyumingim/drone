@@ -29,10 +29,11 @@ def _put(img, text, y, color=(200, 200, 200), scale=0.52):
                 cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
 
-def draw_hud(frame, pose, latency, depth_alt):
+def draw_hud(frame, pose, latency, depth_alt, depth_lat):
     h, w = frame.shape[:2]
     PANEL = 202
     detect_ms, total_ms, full_ms = latency
+    depth_proc_ms, depth_full_ms = depth_lat
 
     # 하단 반투명 패널
     roi = frame[h - PANEL:h]
@@ -82,7 +83,8 @@ def draw_hud(frame, pose, latency, depth_alt):
              f'go_to   dN={n:+.3f}m  dE={e:+.3f}m  (tag world 기준)',
              y0 + dy * 3)
         _put(frame,
-             f'Depth   alt={depth_alt:.3f}m' if depth_alt else 'Depth   ---',
+             f'Depth   alt={depth_alt:.3f}m  proc={depth_proc_ms:.1f}ms  lag={depth_full_ms:.0f}ms'
+             if depth_alt else f'Depth   ---  proc={depth_proc_ms:.1f}ms  lag={depth_full_ms:.0f}ms',
              y0 + dy * 4, (180, 255, 130))
         _put(frame,
              f'detect={detect_ms:.1f}ms  total={total_ms:.1f}ms  full={full_ms:.1f}ms',
@@ -100,7 +102,8 @@ def draw_hud(frame, pose, latency, depth_alt):
              y0 + dy * 2, (180, 180, 100))
         _put(frame, 'go_to   --- (tag 미감지)', y0 + dy * 3)
         _put(frame,
-             f'Depth   alt={depth_alt:.3f}m' if depth_alt else 'Depth   ---',
+             f'Depth   alt={depth_alt:.3f}m  proc={depth_proc_ms:.1f}ms  lag={depth_full_ms:.0f}ms'
+             if depth_alt else f'Depth   ---  proc={depth_proc_ms:.1f}ms  lag={depth_full_ms:.0f}ms',
              y0 + dy * 4, (180, 255, 130))
         _put(frame,
              f'detect={detect_ms:.1f}ms  total={total_ms:.1f}ms  full={full_ms:.1f}ms',
@@ -119,7 +122,7 @@ try:
         pose = reader.get_pose()
 
         if frame is not None:
-            draw_hud(frame, pose, reader.get_latency(), reader.get_depth_alt())
+            draw_hud(frame, pose, reader.get_latency(), reader.get_depth_alt(), reader.get_depth_latency())
             cv2.imshow(WIN, frame)
 
         if pose:
