@@ -265,7 +265,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         # ── DISTANCE_SENSOR 전송 (EK3_SRC1_POSZ=3 Rangefinder 고도 소스) ──
         # MAV_SENSOR_ROTATION_PITCH_270(25) = 하향 — ArduPilot이 RNGFND1로 인식
         depth_alt = tag.get_depth_alt()
-        d_cm = int(depth_alt * 100) if depth_alt else 0  # None → 0cm (지면 근접)
+        d_cm = int(depth_alt * 100) if depth_alt else 10
         c.mav.distance_sensor_send(0, 10, 1000, d_cm, 0, 0, 25, 0)
         with lock:
             cache['depth'] = depth_alt
