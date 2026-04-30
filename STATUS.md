@@ -99,4 +99,4 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | roll/pitch NaN | 멀티스레드 recv_match 충돌 | 단일 리더 스레드 |
 | yaw=0 고정 | 동일한 멀티스레드 충돌 | 단일 리더 스레드 |
 | ARM FAILED | pre-arm check | ARMING_CHECK=0 |
-| UWB fallback 시 XY 위치 무시 | `_COV_UWB[11]=9999` → GCS_Common.cpp가 `posErr=sqrt(cov[0]+cov[6]+cov[11])`로 합산 → posErr≈100m → EKF가 UWB XY까지 무시 | `_COV_UWB[11]=0.25` (EK3_SRC1_POSZ=Baro가 z를 이미 거부하므로 9999 불필요) |
+| UWB fallback 시 XY 위치 무시 | `_COV_UWB[11]=9999` → GCS_Common.cpp가 `posErr=sqrt(cov[0]+cov[6]+cov[11])`로 합산 → posErr≈100m → EKF가 UWB XY까지 무시 | `_COV_UWB[11]=0.25` (EK3_SRC1_POSZ=RangeFinder가 z를 이미 처리하므로 9999 불필요) |
