@@ -169,8 +169,7 @@ def _vision_loop(c, uwb, cache, lock, stop):
     """20Hz UWB → VISION_POSITION_ESTIMATE 전송 스레드.
 
     connect(start_vision=True)일 때만 시작됨.
-    flight_tag.py는 EKF wait 후 cache['vision_pause']=True로 이 루프를 중단하고
-    자체 Tag+UWB 융합 루프로 교체함.
+    flight_tag.py는 start_vision=False로 직접 VPE를 관리.
     yaw는 cache에서 읽어 VPE yaw 필드에 넣음 (EKF yaw 추정 보조).
     20개마다 1회 로그 출력 (1Hz).
     """
@@ -181,10 +180,6 @@ def _vision_loop(c, uwb, cache, lock, stop):
     while not stop.is_set():
         with lock:
             yaw = cache['yaw']
-            paused = cache['vision_pause']
-        if paused:
-            time.sleep(0.05)
-            continue
         xy = uwb.get_xy()
         if xy:
             c.mav.vision_position_estimate_send(
@@ -258,13 +253,12 @@ def connect(uwb, start_vision=True, force_arm=False):
     c.mav.set_gps_global_origin_send(c.target_system, 0, 0, 100000)
 
     cache = {
-        'attitude':    None,
-        'local_pos':   None,
-        'ekf':         None,
-        'heartbeat':   None,
-        'yaw':         0.0,
-        'ack_queue':   Queue(),
-        'vision_pause': False,  # True면 _vision_loop VPE 전송 중단 (flight_tag 전용 loop로 교체 시 사용)
+        'attitude':  None,
+        'local_pos': None,
+        'ekf':       None,
+        'heartbeat': None,
+        'yaw':       0.0,
+        'ack_queue': Queue(),
     }
     lock = threading.Lock()
     stop = threading.Event()
@@ -279,33 +273,24 @@ def connect(uwb, start_vision=True, force_arm=False):
     logger.info('[THREAD] 스레드 시작')
     time.sleep(1)
 
-    # EKF 준비 대기 (최대 30초)
-    logger.info('[EKF] 준비 대기... (need: {})', ekf_str(_EKF_NEED))
-    deadline = time.time() + 30
-    t_start = time.time()
+    # EKF 준비 대기 (최대 20초)
+    logger.info('[EKF] 준비 대기...')
+    deadline = time.time() + 20
     last_flags = None
-    last_log_t = time.time()
     while time.time() < deadline:
         with lock:
             m = cache['ekf']
         if m is None:
             time.sleep(0.05)
             continue
-        now_t = time.time()
-        if m.flags != last_flags or now_t - last_log_t >= 5.0:
-            missing = ekf_str(_EKF_NEED & ~m.flags) or '없음'
-            logger.info('[EKF] flags={:#06x} ({})  미충족={}  경과={:.0f}s',
-                        m.flags, ekf_str(m.flags), missing, now_t - t_start)
+        if m.flags != last_flags:
+            logger.info('[EKF] flags={:#06x} ({})', m.flags, ekf_str(m.flags))
             last_flags = m.flags
-            last_log_t = now_t
         if (m.flags & _EKF_NEED) == _EKF_NEED:
-            logger.info('[EKF] 준비 완료! ({:.1f}s)', now_t - t_start)
+            logger.info('[EKF] 준비 완료!')
             break
     else:
-        with lock:
-            m = cache['ekf']
-        missing = ekf_str(_EKF_NEED & ~m.flags) if m else '수신없음'
-        logger.warning('[EKF] 타임아웃 — 강행 (미충족: {})', missing)
+        logger.warning('[EKF] 타임아웃 — 강행')
 
     # GUIDED 모드 (custom_mode=4)
     cmd(c, mavutil.mavlink.MAV_CMD_DO_SET_MODE,
