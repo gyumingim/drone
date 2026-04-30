@@ -407,13 +407,9 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     last_print = 0.0
     while time.time() < deadline:
         with lock:
-            m     = cache['local_pos']
             att   = cache['attitude']
             srv   = cache['servo']
             depth = cache['depth']
-        if m is None:
-            time.sleep(0.05)
-            continue
 
         if depth and depth >= takeoff_m * 0.95:
             logger.info('[TKOF] 고도 도달! depth={:.2f}m', depth)
@@ -426,15 +422,14 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
             intent  = interpret_flight(srv)
             dep_str = f'{depth:.2f}m' if depth else '---'
             if srv:
-                logger.debug('[TKOF] {} | depth={} | vz={:.3f} | '
+                logger.debug('[TKOF] {} | depth={} | '
                              'roll={:.1f}° pitch={:.1f}° | srv={} {} {} {}',
-                             intent, dep_str, m.vz, roll_deg, pitch_deg,
+                             intent, dep_str, roll_deg, pitch_deg,
                              srv.servo1_raw, srv.servo2_raw,
                              srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.debug('[TKOF] {} | depth={} | vz={:.3f} | '
-                             'roll={:.1f}° pitch={:.1f}°',
-                             intent, dep_str, m.vz, roll_deg, pitch_deg)
+                logger.debug('[TKOF] {} | depth={} | roll={:.1f}° pitch={:.1f}°',
+                             intent, dep_str, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 
