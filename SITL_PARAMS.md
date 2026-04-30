@@ -3,12 +3,17 @@
 ## 실행 순서
 
 ```bash
-# 터미널 1: SITL 시작
+# 터미널 1: SITL 시작 (--out으로 14551 포트 자동 추가)
 python3 ~/ardupilot/Tools/autotest/sim_vehicle.py -v ArduCopter --console --out=127.0.0.1:14551
 
 # 터미널 2: 스크립트
 cd ~/drone && python3 sitl_flight_tag.py
 ```
+
+> `--out=127.0.0.1:14551` 없이 SITL을 이미 실행한 경우 MAVProxy 콘솔에서:
+> ```
+> output add 127.0.0.1:14551
+> ```
 
 ## MAVProxy 콘솔 파라미터 (매 SITL 재시작마다 입력)
 
