@@ -400,13 +400,9 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     if result != 0:
         return False
 
-    # TAKEOFF ACK 직후 z_ground를 기록 — 절대 z 값이 EKF 리셋으로 튀어 있어도
-    # 실제 상승량(z_ground에서 takeoff_m * 0.95 이상 상승)으로 판정.
-    with lock:
-        m0 = cache['local_pos']
-    z_ground = m0.z if m0 is not None else 0.0
-    logger.info('[TKOF] 이륙 시작 z_ground={:.3f}', z_ground)
-    target_z  = z_ground - (takeoff_m * 0.95)  # z_ground 기준 95% 상승 지점
+    # EK3_SRC1_POSZ=2(Rangefinder) 환경에서 EKF z는 baro 기준이 아니라
+    # depth 센서 기준으로 잡히므로, depth를 직접 비교해 고도 판정.
+    logger.info('[TKOF] 이륙 시작 (목표 depth >= {:.2f}m)', takeoff_m * 0.95)
     deadline  = time.time() + 20
     last_print = 0.0
     while time.time() < deadline:
@@ -419,8 +415,8 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
             time.sleep(0.05)
             continue
 
-        if m.z < target_z:
-            logger.info('[TKOF] 고도 도달!')
+        if depth and depth >= takeoff_m * 0.95:
+            logger.info('[TKOF] 고도 도달! depth={:.2f}m', depth)
             return True
 
         now = time.time()
