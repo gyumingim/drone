@@ -54,7 +54,7 @@ HOVER_S   = 5.0              # flight.py 호버 시간 (s)
 # ── EKF 준비 확인 플래그 ──────────────────────────────────────────────────────
 # EKF_STATUS_REPORT.flags에서 아래 비트가 모두 set돼야 비행 가능
 # 0x001=att(자세), 0x002=vel_h(수평속도), 0x008=pos_rel(상대위치), 0x010=pos_abs(절대위치)
-_EKF_NEED = 0x001 | 0x002 | 0x008 | 0x010
+_EKF_NEED = 0x001 | 0x002 | 0x008  # att + vel_h + pos_rel (pos_abs 제외: ExternalNav만 쓸 때 안 세워짐)
 _ARMED    = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
 _MAV_RESULT = {
