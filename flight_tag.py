@@ -87,11 +87,10 @@ def _draw_hud(frame, pose, latency, depth_alt, depth_lat, cache, lock):
 
     with lock:
         srv      = cache['servo']
-        att      = cache['attitude']
         lpos     = cache['local_pos']
         airborne = cache['airborne']
 
-    intent = interpret_flight(srv, att)
+    intent = interpret_flight(srv)
     z_str  = f'{lpos.z:.2f}m' if lpos else '?'
     arm_str = 'AIRBORNE' if airborne else 'GROUND'
 
@@ -278,9 +277,8 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             _srv_tick = 0
             with lock:
                 srv  = cache['servo']
-                att  = cache['attitude']
                 lpos = cache['local_pos']
-            intent = interpret_flight(srv, att)
+            intent = interpret_flight(srv)
             src = ('TAG' if prev_source == 'tag' else
                    'UWB' if prev_source == 'uwb' else '---')
             z_m   = f'{lpos.z:.2f}' if lpos else '?'

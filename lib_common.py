@@ -87,16 +87,19 @@ def ekf_str(flags):
     return '|'.join(n for b, n in _EKF_BITS.items() if flags & b) or 'none'
 
 
-def interpret_flight(srv, att):
-    """서보 출력·자세로 비행 의도를 한 줄 문자열로 반환.
+def interpret_flight(srv):
+    """서보 차이값으로 비행 의도를 한 줄 문자열로 반환.
 
-    반환 예: '상승/좌좌앞' '호버/-' '하강/앞앞우'
-    수평 방향: 지배 방향 2자 + 보조 방향 1자. 단일 방향은 1자.
+    Quad-X 기준 (M1=FR, M2=BL, M3=FL, M4=BR):
+      roll_diff  = (M2+M3)-(M1+M4): + → 우, - → 좌
+      pitch_diff = (M2+M4)-(M1+M3): + → 전, - → 후
+    지배 방향 2자 + 보조 방향 1자. 단일 방향이면 1자.
     """
     if srv is None:
         return '?'
-    avg = (srv.servo1_raw + srv.servo2_raw +
-           srv.servo3_raw + srv.servo4_raw) / 4
+    m1, m2, m3, m4 = (srv.servo1_raw, srv.servo2_raw,
+                       srv.servo3_raw, srv.servo4_raw)
+    avg = (m1 + m2 + m3 + m4) / 4
     if avg < 1200:
         thr = '정지'
     elif avg < 1450:
@@ -108,30 +111,28 @@ def interpret_flight(srv, att):
     else:
         thr = '풀스로틀'
 
-    horiz = '-'
-    if att:
-        r = math.degrees(att.roll)
-        p = math.degrees(att.pitch)
-        r_abs, p_abs = abs(r), abs(p)
-        r_dir = '우' if r > 0 else '좌'
-        p_dir = '후' if p > 0 else '전'
-        THR = 5.0  # 방향 인식 최소 각도 (deg)
-        r_on = r_abs >= THR
-        p_on = p_abs >= THR
-        if not r_on and not p_on:
-            horiz = '-'
-        elif r_on and not p_on:
-            horiz = r_dir
-        elif p_on and not r_on:
-            horiz = p_dir
+    roll_diff  = (m2 + m3) - (m1 + m4)   # +: 우, -: 좌
+    pitch_diff = (m2 + m4) - (m1 + m3)   # +: 전, -: 후
+    r_abs, p_abs = abs(roll_diff), abs(pitch_diff)
+    r_dir = '우' if roll_diff  > 0 else '좌'
+    p_dir = '전' if pitch_diff > 0 else '후'
+    THR = 100  # 유의미한 서보 차이 최솟값 (PWM units)
+    r_on = r_abs >= THR
+    p_on = p_abs >= THR
+    if not r_on and not p_on:
+        horiz = '-'
+    elif r_on and not p_on:
+        horiz = r_dir
+    elif p_on and not r_on:
+        horiz = p_dir
+    else:
+        ratio = r_abs / (r_abs + p_abs)
+        if ratio > 0.55:
+            horiz = r_dir + r_dir + p_dir   # 우우전
+        elif ratio < 0.45:
+            horiz = p_dir + p_dir + r_dir   # 전전우
         else:
-            ratio = r_abs / (r_abs + p_abs)
-            if ratio > 0.6:
-                horiz = r_dir + r_dir + p_dir   # 좌좌앞
-            elif ratio < 0.4:
-                horiz = p_dir + p_dir + r_dir   # 앞앞좌
-            else:
-                horiz = r_dir + p_dir           # 좌앞 (비슷한 크기)
+            horiz = r_dir + p_dir           # 우전
     return f'{thr}/{horiz}'
 
 
@@ -426,7 +427,7 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
         if now - last_print >= 0.1:
             roll_deg  = math.degrees(att.roll)  if att else float('nan')
             pitch_deg = math.degrees(att.pitch) if att else float('nan')
-            intent  = interpret_flight(srv, att)
+            intent  = interpret_flight(srv)
             dep_str = f'{depth:.2f}m' if depth else '---'
             if srv:
                 logger.debug('[TKOF] {} | z={:.3f} depth={} | vz={:.3f} | '
