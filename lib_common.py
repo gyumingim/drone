@@ -175,7 +175,7 @@ def _vision_loop(c, uwb, cache, lock, stop):
     """
     cov = [0.0] * 21
     cov[0] = cov[6] = 0.01   # xy ±10cm
-    cov[11] = 9999.0          # z 무시
+    cov[11] = 0.25            # z ±50cm (POSZ=RangeFinder가 z를 처리, 9999이면 posErr≈100m → EKF가 XY까지 무시)
     sent = 0
     while not stop.is_set():
         with lock:
