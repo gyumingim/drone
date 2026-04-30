@@ -75,7 +75,9 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
     이 함수는 별도 스레드에서 실행되며 FC 연결 직후(이륙 전)부터 시작됨.
     이륙 중에도 UWB VPE를 전송해 EKF가 위치를 잃지 않도록 유지.
     """
-    prev_source = None  # 직전 VPE 소스 ('tag' | 'uwb' | None)
+    # lib_common _vision_loop이 이미 UWB VPE를 전송 중이었으므로 'uwb'로 초기화.
+    # None으로 시작하면 첫 UWB 루프에서 switching=True → reset_cnt 증가 → EKF position 리셋.
+    prev_source = 'uwb'
     reset_cnt = 0       # EKF frame reset 신호 (0~255 순환, 변경 시 EKF 좌표계 리셋)
     last_vpe = None     # (x, y, z) — tag+UWB 둘 다 없을 때 stale VPE 재전송용
 

@@ -346,7 +346,13 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     if result != 0:
         return False
 
-    target_z  = -(takeoff_m * 0.95)   # 목표의 95% 고도 도달 시 성공 판정
+    # TAKEOFF ACK 직후 z_ground를 기록 — 절대 z 값이 EKF 리셋으로 튀어 있어도
+    # 실제 상승량(z_ground에서 takeoff_m * 0.95 이상 상승)으로 판정.
+    with lock:
+        m0 = cache['local_pos']
+    z_ground = m0.z if m0 is not None else 0.0
+    logger.info('[TKOF] 이륙 시작 z_ground={:.3f}', z_ground)
+    target_z  = z_ground - (takeoff_m * 0.95)  # z_ground 기준 95% 상승 지점
     deadline  = time.time() + 20
     last_print = 0.0
     while time.time() < deadline:
