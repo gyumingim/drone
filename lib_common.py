@@ -226,13 +226,14 @@ def _wait_ack(cache, timeout=3):
         return None
 
 
-def connect(uwb, start_vision=True):
+def connect(uwb, start_vision=True, force_arm=False):
     """FC 연결, 스레드 시작, EKF 준비 대기, GUIDED 모드 설정, ARM.
 
     Args:
         uwb: UWBReader 인스턴스 (_vision_loop에서 사용)
         start_vision: True면 UWB VPE 스레드 자동 시작.
                       flight_tag.py처럼 직접 VPE를 관리할 때는 False.
+        force_arm: True면 pre-arm check 무시 ARM (SITL 전용, param2=21196).
 
     Returns:
         성공: (c, stop, cache, lock)
@@ -298,8 +299,9 @@ def connect(uwb, start_vision=True):
     logger.info('[MODE] GUIDED ACK: {}',
                 _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
 
-    # ARM
-    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
+    # ARM (force_arm=True: param2=21196 → pre-arm check 무시, SITL 전용)
+    arm_force = 21196.0 if force_arm else 0.0
+    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, arm_force, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
     result = getattr(ack, 'result', -1)
     logger.info('[ARM] ARM ACK: {}', _MAV_RESULT.get(result, '?'))

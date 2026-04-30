@@ -30,7 +30,7 @@ import threading
 
 from loguru import logger
 import lib_common                       # FC_PORT 오버라이드를 위해 모듈로 임포트
-lib_common.FC_PORT = 'tcp:127.0.0.1:5760'  # SITL TCP 포트
+lib_common.FC_PORT = 'udpin:0.0.0.0:14551'  # MAVProxy UDP 출력 포트 (14550=QGC, 14551=스크립트)
 
 from lib_common import connect, do_takeoff, do_land, go_to, TAKEOFF_M
 
@@ -132,7 +132,7 @@ def main():
     tag.start()
     logger.info('[TAG] FakeTagReader 사용 — Tag 미감지 / depth=1.0m 고정')
 
-    c, stop, cache, lock = connect(uwb, start_vision=False)
+    c, stop, cache, lock = connect(uwb, start_vision=True, force_arm=True)
     if c is None:
         return
 
