@@ -1,24 +1,29 @@
 """
-sitl_flight_tag.py — SITL 테스트용 flight_tag (카메라 실제, UWB fake)
+sitl_flight_tag.py — SITL 테스트용 flight_tag (카메라/UWB/depth 모두 fake)
 
 flight_tag.py와 로직 동일. 차이점:
   - FC: /dev/ttyACM0 → tcp:127.0.0.1:5760 (ArduPilot SITL 기본 TCP)
   - UWB: DWM1001 시리얼 → FakeUWB (항상 (0,0) 반환)
-  - 카메라: 실제 RealSense D435i 사용 (TagReader 그대로)
+  - 카메라: FakeTagReader (Tag 미감지, depth=1.0m 고정)
+  - QGC: sim_vehicle.py 실행 시 MAVProxy가 UDP 14550 자동 출력 → QGC 자동 연결
 
 실행 전 준비:
   1. ArduPilot SITL 시작:
        cd ~/ardupilot && sim_vehicle.py -v ArduCopter --console
-  2. SITL에 파라미터 로드 (EK3_SRC1_POSXY=6 등):
-       param load <path>/param.params  ← MAVProxy 콘솔에서
-  3. 이 스크립트 실행:
+  2. SITL 파라미터 설정 (MAVProxy 콘솔):
+       param set ARMING_CHECK 0 (없으면 arm throttle force 사용)
+       param set VISO_TYPE 1
+       param set EK3_SRC1_POSXY 6
+       param set EK3_SRC1_YAW 6
+       param set EK3_SRC1_POSZ 1
+  3. QGC 실행 → 자동으로 UDP 14550 연결됨
+  4. 이 스크립트 실행:
        python3 sitl_flight_tag.py
 
 검증 목적:
-  - connect → EKF → ARM → TAKEOFF → VPE 전송 → go_to → LAND 흐름
-  - Tag 감지 시 VPE 전환 / go_to(0,0) 수렴 동작
-  - depth DISTANCE_SENSOR 20Hz 전송 여부
-  - UWB 없이도 Tag만으로 호버 가능한지
+  - connect → EKF → ARM → TAKEOFF → VPE(UWB fake) 전송 → LAND 흐름
+  - DISTANCE_SENSOR fake depth 20Hz 전송 여부
+  - QGC에서 드론 위치/자세/고도 실시간 확인
 """
 import time
 import threading
@@ -27,7 +32,6 @@ from loguru import logger
 import lib_common                       # FC_PORT 오버라이드를 위해 모듈로 임포트
 lib_common.FC_PORT = 'tcp:127.0.0.1:5760'  # SITL TCP 포트
 
-from lib_tag_reader import TagReader
 from lib_common import connect, do_takeoff, do_land, go_to, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
@@ -43,6 +47,16 @@ class FakeUWB:
     """SITL용 가짜 UWB — 항상 origin (0, 0) 반환."""
     def start(self): pass
     def get_xy(self): return (0.0, 0.0)
+
+
+class FakeTagReader:
+    """SITL용 가짜 카메라 — Tag 미감지, depth 1.0m 고정."""
+    def start(self): pass
+    def get_pose(self): return None          # 항상 Tag 미감지 → UWB fallback
+    def get_depth_alt(self): return 1.0      # 고정 1m (EK3_SRC1_POSZ=Baro면 무시됨)
+    def get_frame(self): return None
+    def get_latency(self): return (0.0, 0.0, 0.0)
+    def get_depth_latency(self): return (0.0, 0.0)
 
 
 def _vision_loop(c, uwb, tag, cache, lock, stop):
@@ -114,10 +128,9 @@ def main():
     uwb = FakeUWB()
     logger.info('[UWB] FakeUWB 사용 — origin (0, 0) 고정')
 
-    tag = TagReader()
+    tag = FakeTagReader()
     tag.start()
-    logger.info('[TAG] 카메라 초기화...')
-    time.sleep(1)
+    logger.info('[TAG] FakeTagReader 사용 — Tag 미감지 / depth=1.0m 고정')
 
     c, stop, cache, lock = connect(uwb, start_vision=False)
     if c is None:
