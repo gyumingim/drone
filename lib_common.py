@@ -426,15 +426,15 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
             intent  = interpret_flight(srv)
             dep_str = f'{depth:.2f}m' if depth else '---'
             if srv:
-                logger.debug('[TKOF] {} | z={:.3f} depth={} | vz={:.3f} | '
+                logger.debug('[TKOF] {} | depth={} | vz={:.3f} | '
                              'roll={:.1f}° pitch={:.1f}° | srv={} {} {} {}',
-                             intent, m.z, dep_str, m.vz, roll_deg, pitch_deg,
+                             intent, dep_str, m.vz, roll_deg, pitch_deg,
                              srv.servo1_raw, srv.servo2_raw,
                              srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.debug('[TKOF] {} | z={:.3f} depth={} | vz={:.3f} | '
+                logger.debug('[TKOF] {} | depth={} | vz={:.3f} | '
                              'roll={:.1f}° pitch={:.1f}°',
-                             intent, m.z, dep_str, m.vz, roll_deg, pitch_deg)
+                             intent, dep_str, m.vz, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 

@@ -43,10 +43,9 @@ def _draw_hud(frame, pose, latency, depth_alt, depth_lat, cache, lock):
 
     with lock:
         srv  = cache['servo']
-        lpos = cache['local_pos']
 
-    intent = interpret_flight(srv)
-    z_str  = f'{lpos.z:.2f}m' if lpos else '?'
+    intent  = interpret_flight(srv)
+    dep_str = f'{depth_alt:.2f}m' if depth_alt else '0.00m'
 
     roi = frame[h - PANEL:h]
     cv2.addWeighted(np.zeros_like(roi), 0.55, roi, 0.45, 0, roi)
@@ -69,7 +68,7 @@ def _draw_hud(frame, pose, latency, depth_alt, depth_lat, cache, lock):
         cv2.putText(frame, 'o NO TAG', (10, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.78, (60, 60, 230), 2, cv2.LINE_AA)
 
-    cv2.putText(frame, f'{intent}  z={z_str}  [AIRBORNE]',
+    cv2.putText(frame, f'{intent}  depth={dep_str}  [AIRBORNE]',
                 (w - 320, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (0, 255, 255), 1, cv2.LINE_AA)
 
@@ -175,19 +174,17 @@ def _vision_loop(c, tag, cache, lock, stop):
             _srv_tick = 0
             with lock:
                 srv  = cache['servo']
-                lpos = cache['local_pos']
             intent = interpret_flight(srv)
             src = 'TAG' if prev_source == 'tag' else '---'
-            z_m = f'{lpos.z:.2f}' if lpos else '?'
-            dep = f'{depth_alt:.2f}m' if depth_alt else 'None'
+            dep = f'{depth_alt:.2f}m' if depth_alt else '0.00m'
             if srv:
-                logger.info('[STATUS] {} | src={} z={}(depth={}) | srv={} {} {} {}',
-                            intent, src, z_m, dep,
+                logger.info('[STATUS] {} | src={} depth={} | srv={} {} {} {}',
+                            intent, src, dep,
                             srv.servo1_raw, srv.servo2_raw,
                             srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.info('[STATUS] {} | src={} z={}(depth={})',
-                            intent, src, z_m, dep)
+                logger.info('[STATUS] {} | src={} depth={}',
+                            intent, src, dep)
 
         time.sleep(0.05)  # 20Hz
 

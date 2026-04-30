@@ -87,12 +87,11 @@ def _draw_hud(frame, pose, latency, depth_alt, depth_lat, cache, lock):
 
     with lock:
         srv      = cache['servo']
-        lpos     = cache['local_pos']
         airborne = cache['airborne']
 
-    intent = interpret_flight(srv)
-    z_str  = f'{lpos.z:.2f}m' if lpos else '?'
-    arm_str = 'AIRBORNE' if airborne else 'GROUND'
+    intent   = interpret_flight(srv)
+    dep_str  = f'{depth_alt:.2f}m' if depth_alt else '0.00m'
+    arm_str  = 'AIRBORNE' if airborne else 'GROUND'
 
     # 하단 반투명 패널
     roi = frame[h - PANEL:h]
@@ -118,7 +117,7 @@ def _draw_hud(frame, pose, latency, depth_alt, depth_lat, cache, lock):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.78, (60, 60, 230), 2, cv2.LINE_AA)
 
     # 우상단: 비행 상태
-    cv2.putText(frame, f'{intent}  z={z_str}  [{arm_str}]',
+    cv2.putText(frame, f'{intent}  depth={dep_str}  [{arm_str}]',
                 (w - 320, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (0, 255, 255) if airborne else (180, 180, 180), 1, cv2.LINE_AA)
 
@@ -277,21 +276,18 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             _srv_tick = 0
             with lock:
                 srv  = cache['servo']
-                lpos = cache['local_pos']
             intent = interpret_flight(srv)
             src = ('TAG' if prev_source == 'tag' else
                    'UWB' if prev_source == 'uwb' else '---')
-            z_m   = f'{lpos.z:.2f}' if lpos else '?'
-            dep   = f'{depth_alt:.2f}m' if depth_alt else 'None'
+            dep   = f'{depth_alt:.2f}m' if depth_alt else '0.00m'
             if srv:
-                logger.info('[STATUS] {} | src={} z={}(depth={}) | '
-                            'srv={} {} {} {}',
-                            intent, src, z_m, dep,
+                logger.info('[STATUS] {} | src={} depth={} | srv={} {} {} {}',
+                            intent, src, dep,
                             srv.servo1_raw, srv.servo2_raw,
                             srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.info('[STATUS] {} | src={} z={}(depth={})',
-                            intent, src, z_m, dep)
+                logger.info('[STATUS] {} | src={} depth={}',
+                            intent, src, dep)
 
         time.sleep(0.05)   # 20Hz (50ms)
 
