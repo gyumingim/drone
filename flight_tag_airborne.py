@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from loguru import logger
 from lib_tag_reader import TagReader
-from lib_common import connect, do_land, go_to, interpret_flight, TAKEOFF_M
+from lib_common import connect, do_takeoff, do_land, go_to, interpret_flight, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
 
@@ -205,9 +205,7 @@ def main():
         return
 
     with lock:
-        cache['vision_pause'] = True   # lib_common _vision_loop 중단
-        cache['airborne'] = True       # takeoff 없이 즉시 tag 추적 허용
-    logger.info('[AIRBORNE] tag 추적 시작')
+        cache['vision_pause'] = True  # lib_common _vision_loop 중단
 
     threading.Thread(
         target=_vision_loop,
@@ -219,6 +217,15 @@ def main():
         args=(tag, cache, lock, stop),
         daemon=True,
     ).start()
+
+    # FC flying state 전환 — 이미 공중이면 EKF z 즉시 목표 도달 판정
+    if not do_takeoff(c, stop, cache, lock):
+        do_land(c, stop, cache)
+        return
+
+    with lock:
+        cache['airborne'] = True
+    logger.info('[AIRBORNE] tag 추적 시작')
 
     try:
         while True:
