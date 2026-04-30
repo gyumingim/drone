@@ -195,15 +195,17 @@ def main():
     time.sleep(1)
 
     # ── FC 연결 및 준비 ───────────────────────────────────────────────────────
-    # start_vision=False: connect() 내장 UWB VPE 루프 미사용
-    # 대신 _vision_loop(아래)가 Tag+UWB 융합 VPE를 직접 담당
-    c, stop, cache, lock = connect(uwb, start_vision=False)
+    # start_vision=True: EKF wait 동안 UWB VPE 전송 → EKF pos_rel 확보
+    # (ref: thien94/vision_to_mavros — VPE를 먼저 보내야 EKF가 AID_RELATIVE 전환)
+    c, stop, cache, lock = connect(uwb, start_vision=True)
     if c is None:
         return
 
-    # ── VPE 루프 시작 (이륙 전) ──────────────────────────────────────────────
-    # 이륙 중에도 UWB VPE가 전송돼야 EKF가 수평 위치를 잃지 않음.
-    # 이 루프를 do_takeoff() 뒤에 두면 이륙 중 EKF가 위치 추정을 잃을 수 있음.
+    # ── VPE 루프 교체 (이륙 전) ──────────────────────────────────────────────
+    # lib_common의 단순 UWB VPE를 중단하고 Tag+UWB 융합 루프로 교체.
+    # vision_pause=True → lib_common _vision_loop가 sleep만 하며 대기
+    with lock:
+        cache['vision_pause'] = True
     threading.Thread(
         target=_vision_loop,
         args=(c, uwb, tag, cache, lock, stop),
