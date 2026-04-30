@@ -87,6 +87,41 @@ def ekf_str(flags):
     return '|'.join(n for b, n in _EKF_BITS.items() if flags & b) or 'none'
 
 
+def interpret_flight(srv, att):
+    """서보 출력·자세·vz로 비행 의도를 한 줄 문자열로 반환.
+
+    반환 예: '상승/좌후' '호버/-' '하강/전'
+    """
+    if srv is None:
+        return '?'
+    avg = (srv.servo1_raw + srv.servo2_raw +
+           srv.servo3_raw + srv.servo4_raw) / 4
+    if avg < 1200:
+        thr = '정지'
+    elif avg < 1450:
+        thr = '하강'
+    elif avg < 1600:
+        thr = '호버'
+    elif avg < 1800:
+        thr = '상승'
+    else:
+        thr = '풀스로틀'
+
+    horiz = ''
+    if att:
+        r = math.degrees(att.roll)
+        p = math.degrees(att.pitch)
+        if r > 5:
+            horiz += '우'
+        elif r < -5:
+            horiz += '좌'
+        if p > 5:
+            horiz += '후'
+        elif p < -5:
+            horiz += '전'
+    return f'{thr}/{horiz or "-"}'
+
+
 def cmd(c, command, *p):
     """COMMAND_LONG 전송 헬퍼. confirmation=0 고정."""
     c.mav.command_long_send(c.target_system, c.target_component, command, 0, *p)
@@ -376,15 +411,16 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
         if now - last_print >= 0.1:
             roll_deg  = math.degrees(att.roll)  if att else float('nan')
             pitch_deg = math.degrees(att.pitch) if att else float('nan')
+            intent = interpret_flight(srv, att)
             if srv:
-                logger.debug('[TKOF] z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}° | '
+                logger.debug('[TKOF] {} | z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}° | '
                              'srv={} {} {} {}',
-                             m.z, m.vz, roll_deg, pitch_deg,
+                             intent, m.z, m.vz, roll_deg, pitch_deg,
                              srv.servo1_raw, srv.servo2_raw,
                              srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.debug('[TKOF] z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}°',
-                             m.z, m.vz, roll_deg, pitch_deg)
+                logger.debug('[TKOF] {} | z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}°',
+                             intent, m.z, m.vz, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 

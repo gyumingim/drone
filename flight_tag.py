@@ -44,7 +44,7 @@ import threading
 from loguru import logger
 from lib_uwb_reader import UWBReader
 from lib_tag_reader import TagReader
-from lib_common import connect, do_takeoff, do_land, go_to, TAKEOFF_M
+from lib_common import connect, do_takeoff, do_land, go_to, interpret_flight, TAKEOFF_M
 
 # 이륙 고도와 호버 고도를 동일하게 유지 (1m)
 HOVER_ALT = TAKEOFF_M
@@ -175,9 +175,11 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             _srv_tick = 0
             with lock:
                 srv = cache['servo']
+                att = cache['attitude']
             if srv:
-                logger.debug('[SERVO] 1={} 2={} 3={} 4={}',
-                             srv.servo1_raw, srv.servo2_raw,
+                intent = interpret_flight(srv, att)
+                logger.debug('[SERVO] {} | 1={} 2={} 3={} 4={}',
+                             intent, srv.servo1_raw, srv.servo2_raw,
                              srv.servo3_raw, srv.servo4_raw)
 
         time.sleep(0.05)   # 20Hz (50ms)
