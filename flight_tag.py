@@ -80,6 +80,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
     prev_source = 'uwb'
     reset_cnt = 0       # EKF frame reset 신호 (0~255 순환, 변경 시 EKF 좌표계 리셋)
     last_vpe = None     # (x, y, z) — tag+UWB 둘 다 없을 때 stale VPE 재전송용
+    _srv_tick = 0       # 서보 로그 주기 카운터 (20Hz → 20 = 1Hz)
 
     while not stop.is_set():
         pose = tag.get_pose()  # (north, east, down, yaw) or None
@@ -167,6 +168,17 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         depth_alt = tag.get_depth_alt()
         d_cm = int(depth_alt * 100) if depth_alt else 0  # None → 0cm (지면 근접)
         c.mav.distance_sensor_send(0, 10, 1000, d_cm, 0, 0, 25, 0)
+
+        # ── 서보 출력 1Hz 로그 ─────────────────────────────────────────────────
+        _srv_tick += 1
+        if _srv_tick >= 20:
+            _srv_tick = 0
+            with lock:
+                srv = cache['servo']
+            if srv:
+                logger.debug('[SERVO] 1={} 2={} 3={} 4={}',
+                             srv.servo1_raw, srv.servo2_raw,
+                             srv.servo3_raw, srv.servo4_raw)
 
         time.sleep(0.05)   # 20Hz (50ms)
 

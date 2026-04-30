@@ -158,6 +158,8 @@ def _reader_loop(c, cache, lock, stop):
                     cache['heartbeat'] = m
                 elif t == 'COMMAND_ACK':
                     cache['ack_queue'].put(m)
+                elif t == 'SERVO_OUTPUT_RAW':
+                    cache['servo'] = m
                 elif t == 'STATUSTEXT':
                     sev = _SEV[m.severity] if m.severity < len(_SEV) else str(m.severity)
                     logger.info('[FC] [{}] {}', sev, m.text)
@@ -266,6 +268,7 @@ def connect(uwb, start_vision=True, force_arm=False):
         'ack_queue':    Queue(),
         'vision_pause': False,  # True면 _vision_loop VPE 전송 중단 (외부 loop로 교체 시 사용)
         'airborne':     False,  # True면 이륙 완료 — go_to() 허용
+        'servo':        None,
     }
     lock = threading.Lock()
     stop = threading.Event()
@@ -360,6 +363,7 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
         with lock:
             m   = cache['local_pos']
             att = cache['attitude']
+            srv = cache['servo']
         if m is None:
             time.sleep(0.05)
             continue
@@ -372,9 +376,15 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
         if now - last_print >= 0.1:
             roll_deg  = math.degrees(att.roll)  if att else float('nan')
             pitch_deg = math.degrees(att.pitch) if att else float('nan')
-            logger.debug('[TKOF] z={:.3f} vz={:.3f} | x={:.3f} y={:.3f} | '
-                         'roll={:.1f}° pitch={:.1f}°',
-                         m.z, m.vz, m.x, m.y, roll_deg, pitch_deg)
+            if srv:
+                logger.debug('[TKOF] z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}° | '
+                             'srv={} {} {} {}',
+                             m.z, m.vz, roll_deg, pitch_deg,
+                             srv.servo1_raw, srv.servo2_raw,
+                             srv.servo3_raw, srv.servo4_raw)
+            else:
+                logger.debug('[TKOF] z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}°',
+                             m.z, m.vz, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 
