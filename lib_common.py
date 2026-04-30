@@ -88,9 +88,10 @@ def ekf_str(flags):
 
 
 def interpret_flight(srv, att):
-    """서보 출력·자세·vz로 비행 의도를 한 줄 문자열로 반환.
+    """서보 출력·자세로 비행 의도를 한 줄 문자열로 반환.
 
-    반환 예: '상승/좌후' '호버/-' '하강/전'
+    반환 예: '상승/좌좌앞' '호버/-' '하강/앞앞우'
+    수평 방향: 지배 방향 2자 + 보조 방향 1자. 단일 방향은 1자.
     """
     if srv is None:
         return '?'
@@ -107,19 +108,31 @@ def interpret_flight(srv, att):
     else:
         thr = '풀스로틀'
 
-    horiz = ''
+    horiz = '-'
     if att:
         r = math.degrees(att.roll)
         p = math.degrees(att.pitch)
-        if r > 5:
-            horiz += '우'
-        elif r < -5:
-            horiz += '좌'
-        if p > 5:
-            horiz += '후'
-        elif p < -5:
-            horiz += '전'
-    return f'{thr}/{horiz or "-"}'
+        r_abs, p_abs = abs(r), abs(p)
+        r_dir = '우' if r > 0 else '좌'
+        p_dir = '후' if p > 0 else '전'
+        THR = 5.0  # 방향 인식 최소 각도 (deg)
+        r_on = r_abs >= THR
+        p_on = p_abs >= THR
+        if not r_on and not p_on:
+            horiz = '-'
+        elif r_on and not p_on:
+            horiz = r_dir
+        elif p_on and not r_on:
+            horiz = p_dir
+        else:
+            ratio = r_abs / (r_abs + p_abs)
+            if ratio > 0.6:
+                horiz = r_dir + r_dir + p_dir   # 좌좌앞
+            elif ratio < 0.4:
+                horiz = p_dir + p_dir + r_dir   # 앞앞좌
+            else:
+                horiz = r_dir + p_dir           # 좌앞 (비슷한 크기)
+    return f'{thr}/{horiz}'
 
 
 def cmd(c, command, *p):
@@ -304,6 +317,7 @@ def connect(uwb, start_vision=True, force_arm=False):
         'vision_pause': False,  # True면 _vision_loop VPE 전송 중단 (외부 loop로 교체 시 사용)
         'airborne':     False,  # True면 이륙 완료 — go_to() 허용
         'servo':        None,
+        'depth':        None,  # 최신 depth_alt (m) — flight_tag _vision_loop가 갱신
     }
     lock = threading.Lock()
     stop = threading.Event()
@@ -396,9 +410,10 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     last_print = 0.0
     while time.time() < deadline:
         with lock:
-            m   = cache['local_pos']
-            att = cache['attitude']
-            srv = cache['servo']
+            m     = cache['local_pos']
+            att   = cache['attitude']
+            srv   = cache['servo']
+            depth = cache['depth']
         if m is None:
             time.sleep(0.05)
             continue
@@ -411,16 +426,18 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
         if now - last_print >= 0.1:
             roll_deg  = math.degrees(att.roll)  if att else float('nan')
             pitch_deg = math.degrees(att.pitch) if att else float('nan')
-            intent = interpret_flight(srv, att)
+            intent  = interpret_flight(srv, att)
+            dep_str = f'{depth:.2f}m' if depth else '---'
             if srv:
-                logger.debug('[TKOF] {} | z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}° | '
-                             'srv={} {} {} {}',
-                             intent, m.z, m.vz, roll_deg, pitch_deg,
+                logger.debug('[TKOF] {} | z={:.3f} depth={} | vz={:.3f} | '
+                             'roll={:.1f}° pitch={:.1f}° | srv={} {} {} {}',
+                             intent, m.z, dep_str, m.vz, roll_deg, pitch_deg,
                              srv.servo1_raw, srv.servo2_raw,
                              srv.servo3_raw, srv.servo4_raw)
             else:
-                logger.debug('[TKOF] {} | z={:.3f} vz={:.3f} | roll={:.1f}° pitch={:.1f}°',
-                             intent, m.z, m.vz, roll_deg, pitch_deg)
+                logger.debug('[TKOF] {} | z={:.3f} depth={} | vz={:.3f} | '
+                             'roll={:.1f}° pitch={:.1f}°',
+                             intent, m.z, dep_str, m.vz, roll_deg, pitch_deg)
             last_print = now
         time.sleep(0.02)
 
