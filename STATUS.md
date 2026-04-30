@@ -55,14 +55,17 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] tag yaw → VPE에 직접 사용 (gyro 적분 대신), tag 감지 중 drone_yaw 동기화
 - [x] `_COV_UWB[11]` 버그 수정 — ArduPilot 소스 분석으로 발견 (아래 참고)
 - [x] D435i depth 고도 소스 추가 — `lib_tag_reader.py` depth 스트림(424×240) + `get_depth_alt()` / `flight_tag.py` DISTANCE_SENSOR 20Hz 전송
+- [x] SITL 환경 구성 — `sitl_flight_tag.py`(FakeUWB/FakeTagReader), `sitl_run.sh`(파라미터 자동 적용), `SITL_PARAMS.md`
+- [x] `_EKF_NEED` pos_abs(0x010) 제거 — GPS_TYPE=0(SITL/실기체 공통)일 때 ExternalNav만으론 pos_abs 미설정 → EKF 대기 무한루프 수정
+- [x] `connect()` force_arm 파라미터 추가 — SITL pre-arm bypass (param2=21196)
+- [x] FC_PORT SITL 대응 — `udpin:0.0.0.0:14551` (MAVProxy --out=127.0.0.1:14551)
 
 ## 하고 있는 일
 
-- [ ] GitHub MCP 서버 설치 (PAT 발급 대기 중)
+- [ ] SITL 전체 흐름 검증 (connect→EKF→ARM→TAKEOFF→hover→LAND)
 
 ## 할 일
 
-- [ ] GitHub MCP 설치 완료
 - [ ] 실제 하드웨어 비행 테스트
   - [ ] `dbg_tag_test.py` — AprilTag NED 방향 검증 (north>0 확인)
   - [ ] `dbg_monitor.py` — EKF/UWB 정상 동작 확인

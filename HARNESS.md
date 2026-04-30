@@ -39,7 +39,9 @@
     - 문제점 및 해결방안
 
 ## 깃허브 레포 코드 확인 규칙
-    - GitHub MCP 사용: search_code로 키워드 검색 → get_file_contents로 실제 코드 확인
+    - **GitHub MCP 도구(mcp__github__search_code, mcp__github__get_file_contents) 직접 사용 필수**
+    - 서브에이전트에 위임 금지 — hallucination 위험. Claude 본인이 MCP 도구 직접 호출할 것
+    - search_code로 키워드 검색 → get_file_contents로 실제 코드 라인 직접 확인
     - README만 보고 동작 방식 단정 금지
     - 실제 소스 파일 열어서 코드 라인 직접 확인 후 주장할 것
 

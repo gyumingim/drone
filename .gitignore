@@ -1,1 +1,11 @@
 logs/
+__pycache__/
+*.pyc
+eeprom.bin
+mav.parm
+mav.tlog
+mav.tlog.raw
+sitl.parm
+terrain/
+dumpcore.sh_*
+dumpstack.sh_*
