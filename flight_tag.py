@@ -89,7 +89,8 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
         # EK3_SRC1_YAW=6(ExternalNav)이므로 EKF가 실제로 사용함
         # 독립 yaw 센서가 없으므로 FC 자신의 gyro 적분값을 확인하는 역할
         with lock:
-            att = cache['attitude']
+            att      = cache['attitude']
+            airborne = cache['airborne']
         drone_yaw = att.yaw if att else 0.0
 
         if pose:
@@ -114,7 +115,8 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                 _COV_TAG, reset_cnt)
 
             last_vpe = (-n, -e, -HOVER_ALT)
-            go_to(c, 0, 0, -HOVER_ALT)  # 태그 정중앙 위로 이동 (NED z 음수=위)
+            if airborne:
+                go_to(c, 0, 0, -HOVER_ALT)  # 태그 정중앙 위로 이동 (NED z 음수=위)
             prev_source = 'tag'
 
         else:
@@ -139,7 +141,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
 
                 # 전환 직후 한 루프는 go_to 생략 — EKF가 새 좌표계를 수렴할 시간(50ms) 확보
                 # 수렴 전에 go_to를 보내면 EKF가 잘못된 위치 기준으로 명령을 해석할 수 있음
-                if not switching:
+                if not switching and airborne:
                     go_to(c, xy[0], xy[1], -HOVER_ALT)
 
                 prev_source = 'uwb'
@@ -210,6 +212,8 @@ def main():
         do_land(c, stop, cache)
         return
 
+    with lock:
+        cache['airborne'] = True  # 이륙 완료 → go_to() 허용
     logger.info('[HOVER] 이륙 완료 — tag 감지 대기')
 
     # ── 메인 루프: Ctrl+C 대기 ───────────────────────────────────────────────

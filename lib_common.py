@@ -265,6 +265,7 @@ def connect(uwb, start_vision=True, force_arm=False):
         'yaw':          0.0,
         'ack_queue':    Queue(),
         'vision_pause': False,  # True면 _vision_loop VPE 전송 중단 (외부 loop로 교체 시 사용)
+        'airborne':     False,  # True면 이륙 완료 — go_to() 허용
     }
     lock = threading.Lock()
     stop = threading.Event()
