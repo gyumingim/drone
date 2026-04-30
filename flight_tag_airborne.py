@@ -18,6 +18,12 @@ from lib_common import connect, do_land, go_to, interpret_flight, TAKEOFF_M
 
 HOVER_ALT = TAKEOFF_M
 
+
+class _UWBStub:
+    """connect() 내부 EKF init 중 pos_rel 충족용 정적 VPE 소스."""
+    def get_xy(self):
+        return (0.0, 0.0)
+
 _COV_TAG = [0.0] * 21
 _COV_TAG[0] = _COV_TAG[6] = _COV_TAG[11] = 0.002
 
@@ -192,14 +198,15 @@ def main():
     logger.info('[TAG] 카메라 초기화...')
     time.sleep(1)
 
-    # start_vision=False: UWB VPE 루프 불필요 (이 파일이 직접 관리)
-    c, stop, cache, lock = connect(None, start_vision=False)
+    # EKF init 중 pos_rel 충족을 위해 stub VPE(0,0) 전송
+    # connect() 반환 후 vision_pause=True로 중단하고 tag 루프로 교체
+    c, stop, cache, lock = connect(_UWBStub(), start_vision=True)
     if c is None:
         return
 
-    # 이미 공중 — takeoff 없이 즉시 tag 추적 허용
     with lock:
-        cache['airborne'] = True
+        cache['vision_pause'] = True   # lib_common _vision_loop 중단
+        cache['airborne'] = True       # takeoff 없이 즉시 tag 추적 허용
     logger.info('[AIRBORNE] tag 추적 시작')
 
     threading.Thread(
