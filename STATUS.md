@@ -64,10 +64,11 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] STATUS.md EK3_SRC1_POSZ 중복 수정 — 1(Baro)/2(Rangefinder) 양쪽 기재 → 2로 통일
 - [x] **SITL 전체 흐름 검증 완료** — connect→EKF→ARM→TAKEOFF 1m→hover 5s→LAND 정상 동작 확인
 - [x] FC_PORT SITL 대응 — `udpin:0.0.0.0:14551` (MAVProxy --out=127.0.0.1:14551)
+- [x] SITL 간헐 크래시 원인 분석 — EKF AID_NONE→AID_ABSOLUTE 전환 시 SIGFPE/SIGSEGV (feenableexcept 활성). 정확한 라인은 스택 트레이스 필요 → `~/drone/Tools/scripts/dumpstack.sh` symlink 생성 완료
 
 ## 하고 있는 일
 
-- [ ] 실제 하드웨어 비행 테스트
+- [ ] SITL 간헐 크래시 스택 트레이스 확인 (dumpstack.sh symlink 생성됨 — 다음 크래시 시 자동 캡처)
 
 ## 할 일
 

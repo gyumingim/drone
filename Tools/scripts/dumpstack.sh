@@ -1,0 +1,1 @@
+/home/karma/ardupilot/Tools/scripts/dumpstack.sh
