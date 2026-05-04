@@ -46,7 +46,7 @@ logger.add(
 )
 
 # ── 하드웨어 설정 ─────────────────────────────────────────────────────────────
-FC_PORT   = '/dev/ttyACM0'   # FC USB-UART 포트 (Pixhawk/ArduPilot)
+FC_PORT   = os.environ.get('FC_PORT', '/dev/ttyACM0')  # 환경변수로 오버라이드 가능 (SITL: udpin:0.0.0.0:14551)
 FC_BAUD   = 57600            # ArduPilot 기본 텔레메트리 보레이트
 TAKEOFF_M = 1            # 이륙 목표 고도 (m)
 HOVER_S   = 5.0              # flight.py 호버 시간 (s)

@@ -1,58 +1,60 @@
-# SITL 파라미터 설정 가이드
+# SITL 실행 가이드
 
 ## 실행 순서
 
 ```bash
-# 터미널 1: SITL 시작 (--out으로 14551 포트 자동 추가)
-python3 ~/ardupilot/Tools/autotest/sim_vehicle.py -v ArduCopter --console --out=127.0.0.1:14551
+# 터미널 1: SITL 시작
+./sitl_run.sh
 
-# 터미널 2: 스크립트
-cd ~/drone && python3 sitl_flight_tag.py
+# 터미널 2: 비행 스크립트 (MAVProxy 연결 확인 후)
+python3 sitl_flight.py
+
+# 터미널 3: XY 궤적 시각화 (선택)
+python3 sitl_viz.py
 ```
 
-> `--out=127.0.0.1:14551` 없이 SITL을 이미 실행한 경우 MAVProxy 콘솔에서:
-> ```
-> output add 127.0.0.1:14551
-> ```
+## 파일 구조
 
-## MAVProxy 콘솔 파라미터 (매 SITL 재시작마다 입력)
+| 파일 | 역할 |
+|---|---|
+| `sitl_run.sh` | SITL 시작 + MAVProxy 포트 설정 |
+| `sitl.parm` | SITL 파라미터 자동 적용 |
+| `sitl_flight.py` | flight.py와 동일한 흐름 (FakeUWB/FakeTagReader 사용) |
+| `sitl_viz.py` | LOCAL_POSITION_NED 실시간 XY 궤적 시각화 |
+| `lib_fake_sensors.py` | FakeUWB (노이즈 주입), FakeTagReader |
 
-```
-param set GPS_TYPE 0
-param set ARMING_CHECK 0
-param set VISO_TYPE 1
-param set EK3_SRC1_POSXY 6
-param set EK3_SRC1_YAW 6
-param set EK3_SRC1_POSZ 1
-param set RNGFND1_TYPE 0
-reboot
-```
+## 포트 구성
 
-> reboot 후 MAVProxy가 재연결되면 스크립트 실행
+| 포트 | 연결 대상 |
+|---|---|
+| UDP 14550 | QGC 자동 연결 |
+| UDP 14551 | `sitl_flight.py` (비행 스크립트) |
+| UDP 14552 | `sitl_viz.py` (궤적 시각화) |
 
 ## 파라미터 설명
 
 | 파라미터 | SITL 값 | 실기체 값 | 이유 |
 |---|---|---|---|
-| `GPS_TYPE` | **0** | 1 | SITL GPS 시뮬레이터 비활성화 — GPS prearm check 3개 제거 |
-| `ARMING_CHECK` | **0** | 0 | 모든 prearm check 비활성화 |
-| `VISO_TYPE` | 1 | 1 | MAVLink VISION_POSITION_ESTIMATE 수신 활성화 |
-| `EK3_SRC1_POSXY` | 6 | 6 | XY 소스 = ExternalNav (VPE) |
-| `EK3_SRC1_YAW` | 6 | 6 | Yaw 소스 = ExternalNav (VPE) |
-| `EK3_SRC1_POSZ` | **1** | 2 | Z 소스: SITL=Baro / 실기체=Rangefinder(D435i) |
-| `RNGFND1_TYPE` | **0** | 10 | SITL=Rangefinder 비활성화 / 실기체=MAVLink |
-| `RNGFND1_MAX_CM` | - | 1000 | D435i 최대 거리 10m |
-| `RNGFND1_MIN_CM` | - | 10 | 최소 감지 거리 10cm |
-| `VISO_DELAY_MS` | - | 82 | VPE 전송 지연 보정 (카메라 실측값) |
-| `VISO_YAW_M_NSE` | - | 0.05 | yaw 측정 노이즈 (기본 0.2 → 0.05) |
+| `GPS_TYPE` | 0 | 1 | GPS 비활성화 |
+| `ARMING_CHECK` | 0 | 0 | pre-arm check 비활성화 |
+| `VISO_TYPE` | 1 | 1 | MAVLink VPE 수신 |
+| `EK3_SRC1_POSXY` | 6 | 6 | XY = ExternalNav |
+| `EK3_SRC1_YAW` | 6 | 6 | Yaw = ExternalNav |
+| `EK3_SRC1_POSZ` | 2 | 2 | Z = Rangefinder (실기체와 동일) |
+| `RNGFND1_TYPE` | 10 | 10 | MAVLink DISTANCE_SENSOR |
+| `RNGFND1_MAX_CM` | 1000 | 1000 | 최대 10m |
+| `RNGFND1_MIN_CM` | 10 | 10 | 최소 10cm |
+| `PSC_POSXY_P` | 0.5 | 0.5 | 진동 감소 (기본값 1.0에서 낮춤) |
+| `PSC_VELXY_P` | 1.0 | 1.0 | 속도 제어 |
+| `PSC_VELXY_I` | 0.5 | 0.5 | 적분항 |
+| `PSC_VELXY_D` | 0.25 | 0.25 | 미분항 |
 
-## 실기체 전용 파라미터 (SITL에서는 불필요)
+## 노이즈 시나리오
 
-```
-param set VISO_DELAY_MS 82
-param set VISO_YAW_M_NSE 0.05
-param set RNGFND1_TYPE 10
-param set RNGFND1_MAX_CM 1000
-param set RNGFND1_MIN_CM 10
-param set EK3_SRC1_POSZ 2
-```
+`sitl_flight.py`의 `FakeUWB(noise_m=...)` 값만 바꾸면 됨:
+
+| noise_m | 시나리오 | 목적 |
+|---|---|---|
+| `0.0` | 이상적 조건 | 기본 흐름 (connect→EKF→TAKEOFF→HOVER→LAND) 검증 |
+| `0.1` | 약한 노이즈 | 정상 UWB 환경 시뮬레이션 |
+| `0.3` | 강한 노이즈 | 실내 멀티패스 시뮬레이션, 진동 재현 |
