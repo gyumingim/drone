@@ -48,7 +48,7 @@ logger.add(
 # ── 하드웨어 설정 ─────────────────────────────────────────────────────────────
 FC_PORT   = '/dev/ttyACM0'   # FC USB-UART 포트 (Pixhawk/ArduPilot)
 FC_BAUD   = 57600            # ArduPilot 기본 텔레메트리 보레이트
-TAKEOFF_M = 1.5              # 이륙 목표 고도 (m)
+TAKEOFF_M = 1            # 이륙 목표 고도 (m)
 HOVER_S   = 5.0              # flight.py 호버 시간 (s)
 
 # ── EKF 준비 확인 플래그 ──────────────────────────────────────────────────────
@@ -241,9 +241,8 @@ def _vision_loop(c, uwb, cache, lock, stop):
             c.mav.vision_position_estimate_send(
                 int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov)
             sent += 1
-            if sent % 20 == 0:
-                logger.debug('[VIS] xy=({:.3f},{:.3f}) yaw={:.3f}rad total={}',
-                             xy[0], xy[1], yaw, sent)
+            logger.debug('[VIS] xy=({:.3f},{:.3f}) yaw={:.3f}rad total={}',
+                         xy[0], xy[1], yaw, sent)
         time.sleep(0.05)
 
 

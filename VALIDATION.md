@@ -1,6 +1,6 @@
 # 코드 타당성 검증 보고서
 
-검증일: 2026-04-28  
+검증일: 2026-05-04  
 검증 방법: 공식 문서 + GitHub + 포럼 (웹 검색)
 
 ---
@@ -27,15 +27,35 @@
 |------|-----------|-----------|
 | 최소 주파수 | 4Hz 이상 | 20Hz ✅ |
 | XY covariance | 낮게 설정 | `cov[0]=cov[6]=0.01` ✅ |
-| Z covariance | 높게 설정 (baro 사용 시) | `cov[11]=9999.0` ✅ |
+| Z covariance | **0.25 (9999 금지)** | `cov[11]=0.25` ✅ |
 | EK3_SRC1_POSXY | ExternalNav(6) | 6 ✅ |
 | EK3_SRC1_POSZ | Baro(1) | 1 ✅ |
 | EK3_SRC1_YAW | ExternalNav(6) | 6 ✅ |
 
+### ⚠️ cov[11]=9999 금지 — ArduPilot 소스 코드 근거
+
+`GCS_Common.cpp::handle_common_vision_position_estimate_data` (SHA: 3797eb7f):
+
+```cpp
+if (!isnan(covariance[0])) {
+    posErr = sqrtf(covariance[0]+covariance[6]+covariance[11]);  // x+y+z 합산
+    angErr = sqrtf(covariance[15]+covariance[18]+covariance[20]);
+}
+visual_odom->handle_pose_estimate(usec, timestamp_ms, x, y, z, roll, pitch, yaw, posErr, angErr, reset_counter, 0);
+```
+
+- `posErr`는 x/y/z covariance를 **합산**해서 단일 스칼라로 EKF에 전달
+- `cov[11]=9999` 설정 시: `posErr = sqrt(0.25 + 0.25 + 9999) ≈ 100m`
+- EKF는 이 posErr을 XY 신뢰도로도 사용 → **XY까지 사실상 무시됨**
+- EK3_SRC1_POSZ=Baro라도 cov[11] 값은 posErr 합산에 영향을 줌
+- 따라서 z를 "무시"하기 위해 cov[11]=9999를 쓰면 XY 수용이 함께 망가지는 버그
+
+**올바른 설정:** `cov[11] = (UWB z 오차)² = 0.5² = 0.25`
+
 **참고:**
-- https://ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html — 4Hz 이상 권장, Z covariance 높게 설정 패턴 명시
+- https://github.com/ArduPilot/ardupilot/blob/master/libraries/GCS_MAVLink/GCS_Common.cpp — 실제 posErr 계산 코드
+- https://ardupilot.org/dev/docs/mavlink-nongps-position-estimation.html — 4Hz 이상 권장
 - https://ardupilot.org/copter/docs/common-ekf-sources.html — EK3_SRC1_* 파라미터 설명
-- https://ardupilot.org/copter/docs/common-optitrack.html — 동일한 ExternalNav 설정 구조 (Optitrack 예제)
 
 ---
 
@@ -75,7 +95,7 @@
 |------|------|
 | pymavlink 단일 리더 스레드 | ✅ 공식 권장 패턴과 일치 |
 | VISION_POSITION_ESTIMATE 20Hz | ✅ 공식 최소(4Hz) 이상 |
-| Z covariance=9999 | ✅ baro Z 신뢰 시 공식 패턴 |
+| Z covariance=0.25 (9999 금지) | ✅ ArduPilot GCS_Common.cpp posErr 합산 구조 확인 |
 | RC override ch3=1000, 나머지 0 | ✅ MAVLink 공식 정의와 일치 |
 | EKF3 파라미터 (POSXY=6, POSZ=1, YAW=6) | ✅ ArduPilot 공식 indoor non-GPS 권장 |
 | scipy 삼변측량 (trf + z≥0 bound) | ✅ 수학적으로 타당, 표준 구현 |

@@ -136,6 +136,9 @@ def main():
     if c is None:
         return
 
+    with lock:
+        cache['vision_pause'] = True  # lib_common _vision_loop 중단 → sitl _vision_loop로 교체
+
     threading.Thread(
         target=_vision_loop,
         args=(c, uwb, tag, cache, lock, stop),

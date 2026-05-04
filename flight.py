@@ -64,8 +64,8 @@ def main():
         if uwb.get_xy() is None:
             logger.warning('[SAFE] UWB 끊김 — 착륙')
             break
-        go_to(c, 0, 0, -TAKEOFF_M)  # 이륙 지점(UWB origin) 고정, 2Hz
-        time.sleep(0.5)
+        go_to(c, 0, 0, -TAKEOFF_M)  # 이륙 지점(UWB origin) 고정, 10Hz
+        time.sleep(0.1)
 
     # ── 착륙 ─────────────────────────────────────────────────────────────────
     do_land(c, stop, cache)
