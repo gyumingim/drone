@@ -8,6 +8,7 @@ UDP port 14560으로 sitl_flight.py에 전송.
 
 포트: FC_VIZ_PORT 환경변수로 오버라이드 (기본 udpin:0.0.0.0:14552)
 """
+import math
 import os
 import socket
 import threading
@@ -21,6 +22,9 @@ from pymavlink import mavutil
 FC_VIZ_PORT = os.environ.get('FC_VIZ_PORT', 'udpin:0.0.0.0:14552')
 UDP_CTRL_PORT = 14560
 TRAIL = 300
+
+_WARN_M  = 0.5   # 이 이상이면 주황 경고
+_CRASH_M = 1.0   # 이 이상이면 빨간 위험
 
 _xs = collections.deque(maxlen=TRAIL)
 _ys = collections.deque(maxlen=TRAIL)
@@ -60,14 +64,21 @@ def main():
     trail_line,  = ax.plot([], [], 'b-', alpha=0.4, linewidth=1.0, label='trail')
     cur_dot,     = ax.plot([], [], 'ro', markersize=8,  label='current pos', zorder=6)
     target_dot,  = ax.plot([0], [0], 'g*', markersize=14, label='go_to target', zorder=5)
+    # 오차 벡터: 현재 위치 → 목표 (FC가 보정하려는 방향)
+    error_line,  = ax.plot([], [], 'r--', alpha=0.7, linewidth=1.5, label='FC error vector')
     ax.set_xlabel('East (m)')
     ax.set_ylabel('North (m)')
     ax.set_title('Position Trajectory — SITL')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True)
     ax.set_aspect('equal')
     ax.set_xlim(-1, 1)
     ax.set_ylim(-1, 1)
+
+    # 오차 텍스트 (plot 내부 좌상단)
+    err_text = ax.text(0.02, 0.97, '', transform=ax.transAxes,
+                       va='top', ha='left', fontsize=10, fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
     # ── sensor input sliders ──────────────────────────────────────────────────
     fig.text(0.5, 0.455, '── Sensor Input (UWB / Alt) ──',
@@ -115,17 +126,39 @@ def main():
         with _lock:
             x = list(_xs)
             y = list(_ys)
-        # update target marker (East=x-axis, North=y-axis)
+
         target_dot.set_data([_target_e], [_target_n])
+
         if not x:
-            return trail_line, cur_dot, target_dot
+            error_line.set_data([], [])
+            err_text.set_text('no data')
+            err_text.set_color('#888')
+            return trail_line, cur_dot, target_dot, error_line, err_text
+
+        cur_n, cur_e = x[-1], y[-1]
         trail_line.set_data(y, x)
-        cur_dot.set_data([y[-1]], [x[-1]])
+        cur_dot.set_data([cur_e], [cur_n])
+
+        # 오차 벡터: 현재 → 목표
+        error_line.set_data([cur_e, _target_e], [cur_n, _target_n])
+
+        # 오차 거리 + 위험도 색상
+        err = math.hypot(cur_n - _target_n, cur_e - _target_e)
+        if err >= _CRASH_M:
+            color, label = '#cc0000', f'err {err:.2f}m  DANGER — may crash!'
+        elif err >= _WARN_M:
+            color, label = '#e07000', f'err {err:.2f}m  WARNING'
+        else:
+            color, label = '#008800', f'err {err:.2f}m  OK'
+        err_text.set_text(label)
+        err_text.set_color(color)
+        err_text.get_bbox_patch().set_edgecolor(color)
+
         all_vals = x + y + [_target_n, _target_e]
         margin = max(max(abs(v) for v in all_vals), 0.5) * 1.4
         ax.set_xlim(-margin, margin)
         ax.set_ylim(-margin, margin)
-        return trail_line, cur_dot, target_dot
+        return trail_line, cur_dot, target_dot, error_line, err_text
 
     ani = animation.FuncAnimation(fig, update, interval=100, blit=False)  # noqa: F841
     plt.show()
