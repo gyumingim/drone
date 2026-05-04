@@ -38,9 +38,9 @@ def main():
     threading.Thread(target=_recv_loop, daemon=True).start()
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    trail_line, = ax.plot([], [], 'b-', alpha=0.4, linewidth=1.0, label='궤적')
-    cur_dot,    = ax.plot([], [], 'ro', markersize=8, label='현재 위치')
-    ax.scatter([0], [0], marker='+', s=300, c='green', zorder=5, label='목표 (0,0)')
+    trail_line, = ax.plot([], [], 'b-', alpha=0.4, linewidth=1.0, label='trail')
+    cur_dot,    = ax.plot([], [], 'ro', markersize=8, label='current pos')
+    ax.scatter([0], [0], marker='+', s=300, c='green', zorder=5, label='target (0,0)')
     ax.set_xlabel('East (m)')
     ax.set_ylabel('North (m)')
     ax.set_title('Position Trajectory — SITL')
