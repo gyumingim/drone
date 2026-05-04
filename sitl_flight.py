@@ -27,7 +27,7 @@ def main():
     uwb.start()
     logger.info('[SITL] FakeUWB: {}', uwb.get_xy())
 
-    c, stop, cache, lock = connect(uwb, force_arm=True)
+    c, stop, cache, lock = connect(uwb)
     if c is None:
         return
 

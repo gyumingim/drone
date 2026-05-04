@@ -52,9 +52,11 @@ TAKEOFF_M = 1            # 이륙 목표 고도 (m)
 HOVER_S   = 5.0              # flight.py 호버 시간 (s)
 
 # ── EKF 준비 확인 플래그 ──────────────────────────────────────────────────────
-# EKF_STATUS_REPORT.flags에서 아래 비트가 모두 set돼야 비행 가능
-# 0x001=att(자세), 0x002=vel_h(수평속도), 0x008=pos_rel(상대위치), 0x010=pos_abs(절대위치)
-_EKF_NEED = 0x001 | 0x002 | 0x008  # att + vel_h + pos_rel (pos_abs 제외: ExternalNav만 쓸 때 안 세워짐)
+# EKF_STATUS_REPORT.flags에서 아래 비트가 모두 set돼야 mandatory_checks()가 통과됨
+# mandatory_position_checks() → position_ok() → pos_h_abs(0x010) 필요
+# alt_checks() → ekf_alt_ok() → vel_v(0x004) + pos_v_abs(0x020) 필요
+_EKF_NEED = 0x001 | 0x002 | 0x004 | 0x008 | 0x010 | 0x020
+# att | vel_h | vel_v | pos_h_rel | pos_h_abs | pos_v_abs
 _ARMED    = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
 _MAV_RESULT = {
@@ -64,10 +66,10 @@ _MAV_RESULT = {
 _SEV = ['EMERG', 'ALERT', 'CRIT', 'ERR', 'WARN', 'NOTICE', 'INFO', 'DEBUG']
 
 _EKF_BITS = {
-    0x001: 'att',        0x002: 'vel_h',      0x004: 'vel_v',
-    0x008: 'pos_rel',    0x010: 'pos_abs',    0x020: 'const_pos',
-    0x040: 'pred_h',     0x080: 'pred_v',     0x100: 'pred_rel',
-    0x200: 'gps_glitch', 0x400: 'accel_err',
+    0x001: 'att',          0x002: 'vel_h',        0x004: 'vel_v',
+    0x008: 'pos_h_rel',    0x010: 'pos_h_abs',    0x020: 'pos_v_abs',
+    0x040: 'const_pos',    0x080: 'pred_h_rel',   0x100: 'pred_h_abs',
+    0x200: 'gps_glitch',   0x400: 'accel_err',
 }
 
 # SET_POSITION_TARGET_LOCAL_NED type_mask
@@ -281,14 +283,13 @@ def _wait_ack(cache, timeout=3):
         return None
 
 
-def connect(uwb, start_vision=True, force_arm=False):
+def connect(uwb, start_vision=True):
     """FC 연결, 스레드 시작, EKF 준비 대기, GUIDED 모드 설정, ARM.
 
     Args:
         uwb: UWBReader 인스턴스 (_vision_loop에서 사용)
         start_vision: True면 UWB VPE 스레드 자동 시작.
                       flight_tag.py처럼 직접 VPE를 관리할 때는 False.
-        force_arm: True면 pre-arm check 무시 ARM (SITL 전용, param2=21196).
 
     Returns:
         성공: (c, stop, cache, lock)
@@ -367,9 +368,7 @@ def connect(uwb, start_vision=True, force_arm=False):
     logger.info('[MODE] GUIDED ACK: {}',
                 _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
 
-    # ARM (force_arm=True: param2=21196 → pre-arm check 무시, SITL 전용)
-    arm_force = 21196.0 if force_arm else 0.0
-    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, arm_force, 0, 0, 0, 0, 0)
+    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
     result = getattr(ack, 'result', -1)
     logger.info('[ARM] ARM ACK: {}', _MAV_RESULT.get(result, '?'))
