@@ -62,7 +62,7 @@ HOVER_ALT = TAKEOFF_M
 # ArduPilot GCS_Common.cpp: posErr = sqrt(cov[0]+cov[6]+cov[11]) 합산 계산 →
 # cov[11]=9999이면 posErr≈100m이 되어 EKF가 XY까지 사실상 무시함 (버그).
 _COV_UWB = [0.0] * 21
-_COV_UWB[0] = _COV_UWB[6] = _COV_UWB[11] = 0.25
+_COV_UWB[0] = _COV_UWB[6] = _COV_UWB[11] = 1.0
 
 # TAG: ±4.5cm 오차 → variance = 0.045² ≈ 0.002
 # 실제 EKF에 들어가는 posErr = sqrt(0.002+0.002+0.002) = 0.0775m
