@@ -243,8 +243,9 @@ def _vision_loop(c, uwb, cache, lock, stop):
             c.mav.vision_position_estimate_send(
                 int(time.time() * 1e6), xy[0], xy[1], 0.0, 0, 0, yaw, cov)
             sent += 1
-            logger.debug('[VIS] xy=({:.3f},{:.3f}) yaw={:.3f}rad total={}',
-                         xy[0], xy[1], yaw, sent)
+            if sent % 20 == 0:  # 20Hz 전송, 1Hz 로그 (20개마다 1회)
+                logger.debug('[VIS] xy=({:.3f},{:.3f}) yaw={:.3f}rad total={}',
+                             xy[0], xy[1], yaw, sent)
         time.sleep(0.05)
 
 
@@ -365,8 +366,13 @@ def connect(uwb, start_vision=True):
     cmd(c, mavutil.mavlink.MAV_CMD_DO_SET_MODE,
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 4, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
-    logger.info('[MODE] GUIDED ACK: {}',
-                _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
+    guided_result = getattr(ack, 'result', -1)
+    logger.info('[MODE] GUIDED ACK: {}', _MAV_RESULT.get(guided_result, '?'))
+    if guided_result != 0:
+        logger.error('[MODE] GUIDED 전환 실패 — FC 링크 끊김 또는 모드 거부. ARM 중단')
+        time.sleep(2)  # STATUSTEXT 수집 대기
+        stop.set()
+        return None, stop, None, None
 
     # param2=21196 (force) → do_arming_checks=false in arm() → LEFT side path:
     #   mandatory_checks() only = position_ok() + ekf_alt_ok() + rc_in_calibration

@@ -15,6 +15,7 @@ echo ""
 
 python3 ~/ardupilot/Tools/autotest/sim_vehicle.py \
     -v ArduCopter \
+    -w \
     --console \
     --out=127.0.0.1:14551 \
     --out=127.0.0.1:14552 \

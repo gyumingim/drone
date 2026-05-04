@@ -27,13 +27,12 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 | 파라미터 | 값 | 의미 |
 |---|---|---|
 | EK3_SRC1_POSXY | 6 | XY = ExternalNav (UWB) |
-| EK3_SRC1_POSZ | 1 | Z = Baro |
+| EK3_SRC1_POSZ | 2 | Z = Rangefinder (D435i depth → DISTANCE_SENSOR MAVLink) |
 | EK3_SRC1_YAW | 6 | Yaw = ExternalNav |
-| ARMING_CHECK | 0 | pre-arm check 비활성화 |
+| ARMING_CHECK | 0 | pre-arm check 비활성화 (mandatory_checks만 실행) |
 | VISO_TYPE | 1 | Visual Odometry = MAVLink |
 | VISO_YAW_M_NSE | 0.05 | yaw 측정 노이즈(rad). 기본 0.2(≈11.5°) → 0.05로 낮춰야 ArduPilot 내부 하한(5°=0.087rad)까지 활용 가능 |
 | VISO_DELAY_MS | 82 | VPE 전송 지연(ms). 카메라 노출→yaw 완료 실측값 82ms. 기본 25ms로 두면 EKF가 잘못된 IMU 시각에 융합함 |
-| EK3_SRC1_POSZ | 2 | Z = Rangefinder (D435i depth → DISTANCE_SENSOR) |
 | RNGFND1_TYPE | 10 | MAVLink DISTANCE_SENSOR 수신 |
 | RNGFND1_MAX_CM | 1000 | D435i 최대 거리 10m |
 | RNGFND1_MIN_CM | 10 | 최소 감지 거리 10cm |
@@ -57,7 +56,12 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] D435i depth 고도 소스 추가 — `lib_tag_reader.py` depth 스트림(424×240) + `get_depth_alt()` / `flight_tag.py` DISTANCE_SENSOR 20Hz 전송
 - [x] SITL 환경 구성 — `sitl_flight_tag.py`(FakeUWB/FakeTagReader), `sitl_run.sh`(파라미터 자동 적용), `SITL_PARAMS.md`
 - [x] `_EKF_NEED` pos_abs(0x010) 제거 — GPS_TYPE=0(SITL/실기체 공통)일 때 ExternalNav만으론 pos_abs 미설정 → EKF 대기 무한루프 수정
-- [x] `connect()` force_arm 파라미터 추가 — SITL pre-arm bypass (param2=21196)
+- [x] `connect()` force_arm 복원 (param2=21196) — param2=0이면 arm_checks()의 ahrs.healthy()가 EKF 수렴 직후 실패 가능. 21196은 mandatory_checks()만 실행하는 좌측 경로로 전환
+- [x] ARM 실패 시 STATUSTEXT 2s 대기 — stop.set() 즉시 호출 시 FC STATUSTEXT 패킷 누락됨
+- [x] VIS 로그 1Hz로 제한 — 주석/코드 불일치 수정 (sent%20), INFO 메시지 매몰 방지
+- [x] GUIDED ACK 실패 시 abort — 링크 끊김/모드 거부 상태에서 ARM 시도 차단
+- [x] `sitl_run.sh` `-w` 플래그 추가 — EEPROM wipe로 이전 빌드의 stale param 제거 (dev 빌드 간 포맷 변경 대응)
+- [x] STATUS.md EK3_SRC1_POSZ 중복 수정 — 1(Baro)/2(Rangefinder) 양쪽 기재 → 2로 통일
 - [x] FC_PORT SITL 대응 — `udpin:0.0.0.0:14551` (MAVProxy --out=127.0.0.1:14551)
 
 ## 하고 있는 일
