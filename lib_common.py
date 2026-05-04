@@ -436,17 +436,21 @@ def do_takeoff(c, stop, cache, lock, takeoff_m=TAKEOFF_M):
     return False
 
 
-def start_depth_sender(c, tag, stop):
+def start_depth_sender(c, tag, stop, cache=None, lock=None):
     """TagReader depth 고도를 DISTANCE_SENSOR 20Hz로 전송하는 백그라운드 스레드 시작.
 
     EK3_SRC1_POSZ=2(Rangefinder) + RNGFND1_TYPE=10(MAVLink) 설정 필요.
     orientation=25 = MAV_SENSOR_ROTATION_PITCH_270 (하향).
+    cache/lock 전달 시 cache['depth']도 함께 갱신 (flight.py 흐름에서 do_takeoff 판정에 사용).
     """
     def _loop():
         while not stop.is_set():
             depth_alt = tag.get_depth_alt()
             d_cm = int(depth_alt * 100) if depth_alt else 10
             c.mav.distance_sensor_send(0, 10, 1000, d_cm, 0, 0, 25, 0)
+            if cache is not None and lock is not None:
+                with lock:
+                    cache['depth'] = depth_alt
             time.sleep(0.05)  # 20Hz
     threading.Thread(target=_loop, daemon=True).start()
 

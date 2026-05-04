@@ -27,11 +27,11 @@ def main():
     uwb.start()
     logger.info('[SITL] FakeUWB: {}', uwb.get_xy())
 
-    c, stop, cache, lock = connect(uwb)
+    c, stop, cache, lock = connect(uwb, force_arm=True)
     if c is None:
         return
 
-    start_depth_sender(c, tag, stop)
+    start_depth_sender(c, tag, stop, cache, lock)
 
     if not do_takeoff(c, stop, cache, lock):
         do_land(c, stop, cache)

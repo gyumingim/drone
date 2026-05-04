@@ -43,7 +43,7 @@ def main():
         return
 
     # ── depth DISTANCE_SENSOR 전송 시작 ──────────────────────────────────────
-    start_depth_sender(c, tag, stop)
+    start_depth_sender(c, tag, stop, cache, lock)
 
     # ── 이륙 ─────────────────────────────────────────────────────────────────
     # do_takeoff 실패 시 (ACK 거부 or 고도 미달) 즉시 착륙 후 종료
