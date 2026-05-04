@@ -13,13 +13,20 @@ flight.py와 동일한 흐름. 차이점:
 import os
 os.environ.setdefault('FC_PORT', 'udpin:0.0.0.0:14551')
 
+import subprocess
+import sys
 import time
+from pathlib import Path
 from loguru import logger
 from lib_fake_sensors import FakeUWB, FakeTagReader
 from lib_common import connect, do_takeoff, do_land, go_to, start_depth_sender, HOVER_S, TAKEOFF_M
 
+_VIZ = Path(__file__).parent / 'sitl_viz.py'
+
 
 def main():
+    viz = subprocess.Popen([sys.executable, str(_VIZ)])
+
     tag = FakeTagReader(alt_m=TAKEOFF_M)
     tag.start()
 
@@ -47,6 +54,7 @@ def main():
         time.sleep(0.1)
 
     do_land(c, stop, cache)
+    viz.terminate()
 
 
 if __name__ == '__main__':
