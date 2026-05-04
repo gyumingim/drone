@@ -368,12 +368,19 @@ def connect(uwb, start_vision=True):
     logger.info('[MODE] GUIDED ACK: {}',
                 _MAV_RESULT.get(getattr(ack, 'result', -1), '?'))
 
-    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0)
+    # param2=21196 (force) → do_arming_checks=false in arm() → LEFT side path:
+    #   mandatory_checks() only = position_ok() + ekf_alt_ok() + rc_in_calibration
+    # param2=0 (normal) → do_arming_checks=true → RIGHT side path:
+    #   pre_arm_checks() + arm_checks() → includes ahrs.healthy() + compass check
+    #   arm_checks() runs ahrs.healthy() unconditionally — can fail right after EKF
+    #   flag convergence even with ARMING_CHECK=0
+    cmd(c, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1, 21196, 0, 0, 0, 0, 0)
     ack = _wait_ack(cache)
     result = getattr(ack, 'result', -1)
     logger.info('[ARM] ARM ACK: {}', _MAV_RESULT.get(result, '?'))
     if result != 0:
-        logger.error('[ARM] ARM 실패 — pre-arm check 확인 필요')
+        logger.error('[ARM] ARM 실패 — FC STATUSTEXT 2s 대기 중...')
+        time.sleep(2)  # STATUSTEXT는 ACK 직후 별도 패킷으로 도착 — stop 전에 수집
         stop.set()
         return None, stop, None, None
 
