@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 from loguru import logger
-from lib_fake_sensors import FakeUWB, FakeTagReader, start_udp_control
+from lib_fake_sensors import FakeUWB, FakeTagReader, start_udp_control, get_target
 from lib_common import connect, do_takeoff, do_land, go_to, start_depth_sender, TAKEOFF_M
 
 _VIZ = Path(__file__).parent / 'sitl_viz.py'
@@ -66,12 +66,17 @@ def main():
         logger.info('[HOVR] 호버 {:.0f}s', hover_s)
 
     deadline = time.time() + hover_s
+    prev_target = (0.0, 0.0)
     try:
         while time.time() < deadline:
             if uwb.get_xy() is None:
                 logger.warning('[SAFE] UWB 끊김 — 착륙')
                 break
-            go_to(c, 0, 0, -TAKEOFF_M)
+            tn, te = get_target()
+            if (tn, te) != prev_target:
+                logger.info('[NAV] 목표 변경: ({:.2f}N, {:.2f}E)', tn, te)
+                prev_target = (tn, te)
+            go_to(c, tn, te, -TAKEOFF_M)
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass

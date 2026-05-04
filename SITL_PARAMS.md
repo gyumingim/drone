@@ -49,6 +49,26 @@ python3 sitl_viz.py
 | `PSC_VELXY_I` | 0.5 | 0.5 | 적분항 |
 | `PSC_VELXY_D` | 0.25 | 0.25 | 미분항 |
 
+## 3D 시각화 — FlightGear 연동
+
+ArduPilot SITL은 UDP 5503으로 FlightGear 호환 상태를 자동 출력.
+코드 없이 드론 3D 모형(기울기·회전·비행) 확인 가능.
+
+```bash
+# FlightGear 설치
+sudo apt install flightgear
+
+# sitl_run.sh 대신 직접 실행 시 (FlightGear 연동)
+python3 ~/ardupilot/Tools/autotest/sim_vehicle.py \
+    -v ArduCopter -w \
+    --fg-host=localhost \
+    --out=127.0.0.1:14551 \
+    --out=127.0.0.1:14552 \
+    --add-param-file=sitl.parm
+```
+
+FlightGear는 별도 실행 불필요 — `--fg-host` 지정 시 SITL이 자동 연결.
+
 ## 노이즈 시나리오
 
 `sitl_flight.py`의 `FakeUWB(noise_m=...)` 값만 바꾸면 됨:

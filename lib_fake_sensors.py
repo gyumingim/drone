@@ -13,24 +13,36 @@ import threading
 
 UDP_CTRL_PORT = 14560
 
-_state = {'x': 0.0, 'y': 0.0, 'z': 1.0}
+_state = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'target_n': 0.0, 'target_e': 0.0}
 _state_lock = threading.Lock()
 
 
 def start_udp_control(port=UDP_CTRL_PORT):
-    """UDP 수신 스레드 시작. sitl_viz.py 슬라이더 값 반영."""
+    """UDP 수신 스레드 시작. sitl_viz.py 입력값 반영.
+
+    메시지 포맷: "sensor_n,sensor_e,alt[,target_n,target_e]"
+    target 필드는 선택적 — 없으면 이전 값 유지.
+    """
     def _recv():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('', port))
         while True:
             try:
-                data, _ = sock.recvfrom(64)
-                x, y, z = map(float, data.decode().strip().split(','))
+                data, _ = sock.recvfrom(128)
+                parts = list(map(float, data.decode().strip().split(',')))
                 with _state_lock:
-                    _state['x'], _state['y'], _state['z'] = x, y, z
+                    _state['x'], _state['y'], _state['z'] = parts[0], parts[1], parts[2]
+                    if len(parts) >= 5:
+                        _state['target_n'], _state['target_e'] = parts[3], parts[4]
             except Exception:
                 pass
     threading.Thread(target=_recv, daemon=True).start()
+
+
+def get_target():
+    """현재 go_to 목표 위치 반환. (target_n, target_e) in NED meters."""
+    with _state_lock:
+        return _state['target_n'], _state['target_e']
 
 
 class FakeUWB:
