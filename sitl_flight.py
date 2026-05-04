@@ -25,7 +25,7 @@ _VIZ = Path(__file__).parent / 'sitl_viz.py'
 
 
 def main():
-    viz = subprocess.Popen([sys.executable, str(_VIZ)])
+    viz = subprocess.Popen([sys.executable, str(_VIZ)], stderr=subprocess.DEVNULL)
 
     tag = FakeTagReader(alt_m=TAKEOFF_M)
     tag.start()
