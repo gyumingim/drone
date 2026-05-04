@@ -73,7 +73,7 @@ def main():
         return
 
     # ── depth DISTANCE_SENSOR 전송 시작 ──────────────────────────────────────
-    start_depth_sender(c, tag, stop)
+    start_depth_sender(c, tag, stop, cache, lock)
 
     # ── 이륙 ─────────────────────────────────────────────────────────────────
     if not do_takeoff(c, stop, cache, lock):
