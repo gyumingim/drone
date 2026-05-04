@@ -36,8 +36,8 @@ _target_n = 0.0
 _target_e = 0.0
 
 
-def _send_ctrl(sensor_n, sensor_e, alt, target_n, target_e):
-    msg = f'{sensor_n:.3f},{sensor_e:.3f},{alt:.3f},{target_n:.3f},{target_e:.3f}'.encode()
+def _send_ctrl(sensor_n, sensor_e, alt, target_n, target_e, noise):
+    msg = f'{sensor_n:.3f},{sensor_e:.3f},{alt:.3f},{target_n:.3f},{target_e:.3f},{noise:.3f}'.encode()
     _udp_sock.sendto(msg, ('127.0.0.1', UDP_CTRL_PORT))
 
 
@@ -81,30 +81,33 @@ def main():
                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
     # ── sensor input sliders ──────────────────────────────────────────────────
-    fig.text(0.5, 0.455, '── Sensor Input (UWB / Alt) ──',
+    fig.text(0.5, 0.455, '── Sensor Input (UWB / Alt / Noise) ──',
              ha='center', va='bottom', fontsize=9, color='#555')
 
-    ax_sn  = fig.add_axes([0.18, 0.38, 0.64, 0.04])
-    ax_se  = fig.add_axes([0.18, 0.31, 0.64, 0.04])
-    ax_alt = fig.add_axes([0.18, 0.24, 0.64, 0.04])
+    ax_sn    = fig.add_axes([0.18, 0.39, 0.64, 0.035])
+    ax_se    = fig.add_axes([0.18, 0.33, 0.64, 0.035])
+    ax_alt   = fig.add_axes([0.18, 0.27, 0.64, 0.035])
+    ax_noise = fig.add_axes([0.18, 0.21, 0.64, 0.035])
 
-    s_north = Slider(ax_sn,  'UWB North (m)', -5.0, 5.0, valinit=0.0, color='lightgreen')
-    s_east  = Slider(ax_se,  'UWB East  (m)', -5.0, 5.0, valinit=0.0, color='skyblue')
-    s_alt   = Slider(ax_alt, 'Alt       (m)',  0.2, 3.0, valinit=1.0, color='#ffffcc')
+    s_north = Slider(ax_sn,    'UWB North (m)', -5.0, 5.0, valinit=0.0, color='lightgreen')
+    s_east  = Slider(ax_se,    'UWB East  (m)', -5.0, 5.0, valinit=0.0, color='skyblue')
+    s_alt   = Slider(ax_alt,   'Alt       (m)',  0.2, 3.0, valinit=1.0, color='#ffffcc')
+    s_noise = Slider(ax_noise, 'UWB Noise (m)',  0.0, 0.5, valinit=0.0, color='#ffcccc')
 
     def on_sensor_change(_):
-        _send_ctrl(s_north.val, s_east.val, s_alt.val, _target_n, _target_e)
+        _send_ctrl(s_north.val, s_east.val, s_alt.val, _target_n, _target_e, s_noise.val)
 
     s_north.on_changed(on_sensor_change)
     s_east.on_changed(on_sensor_change)
     s_alt.on_changed(on_sensor_change)
+    s_noise.on_changed(on_sensor_change)
 
     # ── flight target textboxes ───────────────────────────────────────────────
-    fig.text(0.5, 0.195, '── Flight Target (Enter to apply) ──',
+    fig.text(0.5, 0.165, '── Flight Target (Enter to apply) ──',
              ha='center', va='bottom', fontsize=9, color='#555')
 
-    ax_tn = fig.add_axes([0.45, 0.13, 0.35, 0.05])
-    ax_te = fig.add_axes([0.45, 0.06, 0.35, 0.05])
+    ax_tn = fig.add_axes([0.45, 0.10, 0.35, 0.05])
+    ax_te = fig.add_axes([0.45, 0.03, 0.35, 0.05])
 
     tb_north = TextBox(ax_tn, 'Target N (m)', initial='0.0')
     tb_east  = TextBox(ax_te, 'Target E (m)', initial='0.0')
@@ -116,7 +119,7 @@ def main():
             _target_e = float(tb_east.text)
         except ValueError:
             return
-        _send_ctrl(s_north.val, s_east.val, s_alt.val, _target_n, _target_e)
+        _send_ctrl(s_north.val, s_east.val, s_alt.val, _target_n, _target_e, s_noise.val)
 
     tb_north.on_submit(on_target_submit)
     tb_east.on_submit(on_target_submit)

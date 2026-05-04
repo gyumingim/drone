@@ -10,10 +10,11 @@ FakeTagReader: detect_rate로 tag 감지 확률 조절
 import random
 import socket
 import threading
+import time
 
 UDP_CTRL_PORT = 14560
 
-_state = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'target_n': 0.0, 'target_e': 0.0}
+_state = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'target_n': 0.0, 'target_e': 0.0, 'noise': 0.0}
 _state_lock = threading.Lock()
 
 
@@ -34,6 +35,8 @@ def start_udp_control(port=UDP_CTRL_PORT):
                     _state['x'], _state['y'], _state['z'] = parts[0], parts[1], parts[2]
                     if len(parts) >= 5:
                         _state['target_n'], _state['target_e'] = parts[3], parts[4]
+                    if len(parts) >= 6:
+                        _state['noise'] = parts[5]
             except Exception:
                 pass
     threading.Thread(target=_recv, daemon=True).start()
@@ -46,26 +49,40 @@ def get_target():
 
 
 class FakeUWB:
-    """SITL용 가짜 UWB.
+    """SITL용 가짜 UWB — DWM1001DEV 10Hz 출력 주기 모사.
 
-    noise_m=0.0 : UDP 슬라이더 값 그대로 반환
-    noise_m=0.3 : ±30cm 가우시안 노이즈 추가 (멀티패스 시뮬레이션)
+    noise_m : 초기값. sitl_viz.py 슬라이더로 실시간 변경됨
+    rate_hz : 10Hz 고정 (실제 DWM1001DEV 기본 출력 주기)
     """
+    _RATE_HZ = 10.0
 
     def __init__(self, noise_m: float = 0.0):
         self._noise = noise_m
+        self._cache = (0.0, 0.0)
+        self._cache_lock = threading.Lock()
 
-    def start(self): pass
+    def start(self):
+        threading.Thread(target=self._sample_loop, daemon=True).start()
+
+    def _sample_loop(self):
+        interval = 1.0 / self._RATE_HZ
+        while True:
+            with _state_lock:
+                x, y = _state['x'], _state['y']
+                noise = _state['noise']
+            effective_noise = max(self._noise, noise)
+            if effective_noise > 0:
+                val = (x + random.gauss(0.0, effective_noise),
+                       y + random.gauss(0.0, effective_noise))
+            else:
+                val = (x, y)
+            with self._cache_lock:
+                self._cache = val
+            time.sleep(interval)
 
     def get_xy(self):
-        with _state_lock:
-            x, y = _state['x'], _state['y']
-        if self._noise > 0:
-            return (
-                x + random.gauss(0.0, self._noise),
-                y + random.gauss(0.0, self._noise),
-            )
-        return (x, y)
+        with self._cache_lock:
+            return self._cache
 
 
 class FakeTagReader:
