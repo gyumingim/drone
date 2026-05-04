@@ -62,11 +62,12 @@ AprilTag + UWB 융합 실내 자율 호버링 드론
 - [x] GUIDED ACK 실패 시 abort — 링크 끊김/모드 거부 상태에서 ARM 시도 차단
 - [x] `sitl_run.sh` `-w` 플래그 추가 — EEPROM wipe로 이전 빌드의 stale param 제거 (dev 빌드 간 포맷 변경 대응)
 - [x] STATUS.md EK3_SRC1_POSZ 중복 수정 — 1(Baro)/2(Rangefinder) 양쪽 기재 → 2로 통일
+- [x] **SITL 전체 흐름 검증 완료** — connect→EKF→ARM→TAKEOFF 1m→hover 5s→LAND 정상 동작 확인
 - [x] FC_PORT SITL 대응 — `udpin:0.0.0.0:14551` (MAVProxy --out=127.0.0.1:14551)
 
 ## 하고 있는 일
 
-- [ ] SITL 전체 흐름 검증 (connect→EKF→ARM→TAKEOFF→hover→LAND)
+- [ ] 실제 하드웨어 비행 테스트
 
 ## 할 일
 
