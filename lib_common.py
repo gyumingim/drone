@@ -226,8 +226,8 @@ def _vision_loop(c, uwb, cache, lock, stop):
     20개마다 1회 로그 출력 (1Hz).
     """
     cov = [0.0] * 21
-    cov[0] = cov[6] = 0.01   # xy ±10cm
-    cov[11] = 0.25            # z ±50cm (POSZ=RangeFinder가 z를 처리, 9999이면 posErr≈100m → EKF가 XY까지 무시)
+    cov[0] = cov[6] = 0.25   # xy ±50cm (flight_tag.py _COV_UWB와 동일)
+    cov[11] = 0.25            # z ±50cm (9999 금지 — posErr 합산으로 XY까지 무시됨)
     sent = 0
     while not stop.is_set():
         with lock:

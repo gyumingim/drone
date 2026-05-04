@@ -58,7 +58,7 @@ HOVER_ALT = TAKEOFF_M
 # variance = (예상오차)² 로 설정
 
 # UWB: ±50cm 오차 → variance = 0.5² = 0.25
-# z는 EK3_SRC1_POSZ=1(Baro)이 이미 무시하므로 cov[11]을 9999로 올릴 필요 없음.
+# z는 EK3_SRC1_POSZ=2(Rangefinder)가 이미 처리하므로 cov[11]을 9999로 올릴 필요 없음.
 # ArduPilot GCS_Common.cpp: posErr = sqrt(cov[0]+cov[6]+cov[11]) 합산 계산 →
 # cov[11]=9999이면 posErr≈100m이 되어 EKF가 XY까지 사실상 무시함 (버그).
 _COV_UWB = [0.0] * 21
@@ -67,7 +67,7 @@ _COV_UWB[0] = _COV_UWB[6] = _COV_UWB[11] = 0.25
 # TAG: ±4.5cm 오차 → variance = 0.045² ≈ 0.002
 # 실제 EKF에 들어가는 posErr = sqrt(0.002+0.002+0.002) = 0.0775m
 # → VISO_POS_M_NSE 하한(기본 0.1m)에 clamp → EKF posErr = 0.1m
-# z(고도)는 EK3_SRC1_POSZ=1(Baro)이 이미 처리 → cov[11] 값은 posErr 합산에만 영향
+# z(고도)는 EK3_SRC1_POSZ=2(Rangefinder)가 이미 처리 → cov[11] 값은 posErr 합산에만 영향
 _COV_TAG = [0.0] * 21
 _COV_TAG[0] = _COV_TAG[6] = _COV_TAG[11] = 0.002
 
@@ -210,7 +210,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
             # yaw: tag 기반 (드리프트 없음) / FC gyro yaw는 tag 미감지 시에만 사용
             c.mav.vision_position_estimate_send(
                 int(now * 1e6),          # 타임스탬프 (μs)
-                -n, -e, -HOVER_ALT,      # x,y: 태그 기준 드론 위치 / z: EK3_SRC1_POSZ=Baro라 무시됨
+                -n, -e, -HOVER_ALT,      # x,y: 태그 기준 드론 위치 / z: EK3_SRC1_POSZ=Rangefinder가 처리
                 0.0, 0.0, tag_yaw,       # roll=0, pitch=0 / yaw: tag 기반 NED yaw (EKF가 사용)
                 _COV_TAG, reset_cnt)
 
@@ -262,7 +262,7 @@ def _vision_loop(c, uwb, tag, cache, lock, stop):
                     _cov_stale, reset_cnt)
                 logger.debug('[VPE] 소스 없음 — 마지막 위치 유지 (stale)')
 
-        # ── DISTANCE_SENSOR 전송 (EK3_SRC1_POSZ=3 Rangefinder 고도 소스) ──
+        # ── DISTANCE_SENSOR 전송 (EK3_SRC1_POSZ=2 Rangefinder 고도 소스) ──
         # MAV_SENSOR_ROTATION_PITCH_270(25) = 하향 — ArduPilot이 RNGFND1로 인식
         depth_alt = tag.get_depth_alt()
         d_cm = int(depth_alt * 100) if depth_alt else 10

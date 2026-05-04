@@ -83,11 +83,11 @@ def _uwb_loop(c, uwb, stop):
     """UWB → VISION_POSITION_ESTIMATE 20Hz 전송.
 
     모니터 실행 중에도 EKF가 위치를 잃지 않도록 VPE를 유지.
-    cov: xy=0.01(±10cm), z=9999(무시)
+    cov: xy=0.25(±50cm), z=0.25 (9999 금지 — posErr 합산으로 XY까지 무시됨)
     """
     cov = [0.0] * 21
-    cov[0] = cov[6] = 0.01
-    cov[11] = 9999.0
+    cov[0] = cov[6] = 0.25
+    cov[11] = 0.25
     while not stop.is_set():
         xyz = uwb.get_xyz()
         xy = (xyz[0], xyz[1]) if xyz else None

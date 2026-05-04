@@ -1,5 +1,5 @@
 """
-flight.py — UWB 기반 제자리 이착륙 (tag 미사용)
+flight.py — UWB 기반 제자리 이착륙 (depth 고도 소스로 TagReader 사용)
 
 동작 순서:
   1. UWB origin 확정 (약 10~30초 소요)
@@ -52,7 +52,7 @@ def main():
         return
 
     # ── 호버 ─────────────────────────────────────────────────────────────────
-    # 2Hz로 go_to(0,0) 전송 — PosVelAccel 서브모드 활성화
+    # 10Hz로 go_to(0,0) 전송 — PosVelAccel 서브모드 활성화
     # hold_position()은 VelAccel(속도=0)만 유지해 바람에 밀려도 복귀 안 함.
     # 명시적 위치 목표를 주기적으로 전송해야 EKF 오차를 보정하며 원위치 복귀.
     # 참조: ardupilot.org/dev/docs/copter-commands-in-guided-mode.html

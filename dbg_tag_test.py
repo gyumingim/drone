@@ -14,7 +14,7 @@ from lib_tag_reader import TagReader, TAG_SIZE_M
 
 DEADBAND_M = 0.08  # flight_tag.py 와 동일
 COV_TAG = 0.002
-COV_UWB = 0.05
+COV_UWB = 0.25
 
 logger.info('[TEST] tag_size={}m  |  q 키로 종료', TAG_SIZE_M)
 reader = TagReader()
